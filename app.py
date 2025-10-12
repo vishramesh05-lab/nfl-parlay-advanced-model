@@ -88,7 +88,7 @@ if wk_col and wk_col != "week":
     stats_df = stats_df.rename(columns={wk_col: "week"})
 
 # last resort: derive from schedules if both have game_id
-if "week" not in stats_df.columns and not sched_df.empty:
+if "week" not in stats_df.columns and isinstance(sched_df, pd.DataFrame) and not sched_df.empty:
     if "game_id" in stats_df.columns and "game_id" in sched_df.columns and "week" in sched_df.columns:
         try:
             stats_df = stats_df.merge(
