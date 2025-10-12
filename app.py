@@ -15,61 +15,66 @@ st.caption("Build: vA8")
 
 SEASON = 2025
 
-@st.cache_data(show_spinner=True, ttl=60*60)
+@st.cache_data(show_spinner=True, ttl=60*30)
 def load_all(season: int):
     import pandas as pd
     import requests
     import streamlit as st
 
     try:
-        # Pull recent NFL games with boxscore data (works preseason + regular season)
-        schedule_url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-        sched = requests.get(schedule_url).json()
-        events = sched.get("events", [])
+        # ✅ ESPN public JSON feed (always valid)
+        url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+        resp = requests.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+
+        events = data.get("events", [])
         if not events:
-            raise ValueError("No active games found in ESPN scoreboard.")
+            raise ValueError("No live or recent games found on ESPN feed.")
 
         players = []
         for ev in events:
-            box_url = ev.get("links", [{}])[0].get("href", "")
-            if not box_url:
-                continue
-
-            # ESPN boxscore endpoint
-            box_data = requests.get(box_url).json()
-            for comp in box_data.get("boxscore", {}).get("players", []):
-                team = comp.get("team", {}).get("abbreviation")
-                for stat_grp in comp.get("statistics", []):
-                    for athlete in stat_grp.get("athletes", []):
-                        name = athlete.get("athlete", {}).get("displayName")
-                        pos = athlete.get("athlete", {}).get("position", {}).get("abbreviation")
-                        for stat in athlete.get("stats", []):
-                            label = stat.get("label", "")
-                            val = stat.get("value", "")
-                            players.append({
-                                "player_display_name": name,
-                                "team": team,
-                                "position": pos,
-                                "stat_name": label,
-                                "stat_value": val
-                            })
+            # The boxscore URL for each event
+            for link in ev.get("links", []):
+                if link.get("rel", [""])[0] == "boxscore":
+                    box_url = link.get("href")
+                    box_resp = requests.get(box_url)
+                    if box_resp.status_code != 200:
+                        continue
+                    box = box_resp.json()
+                    for comp in box.get("boxscore", {}).get("players", []):
+                        team = comp.get("team", {}).get("abbreviation")
+                        for stat_grp in comp.get("statistics", []):
+                            for ath in stat_grp.get("athletes", []):
+                                a = ath.get("athlete", {})
+                                name = a.get("displayName")
+                                pos = a.get("position", {}).get("abbreviation")
+                                for s in ath.get("stats", []):
+                                    label = s.get("label", "")
+                                    val = s.get("value", "")
+                                    players.append({
+                                        "player_display_name": name,
+                                        "team": team,
+                                        "position": pos,
+                                        "stat_name": label,
+                                        "stat_value": val
+                                    })
 
         stats = pd.DataFrame(players)
         if stats.empty:
-            raise ValueError("No player stats returned from ESPN boxscores.")
+            raise ValueError("No player stats returned from ESPN boxscores feed.")
 
         stats["season"] = season
-        stats["week"] = 1
+        stats["week"] = data.get("week", {}).get("number", 1)
         stats["position_group"] = stats["position"]
 
-        st.success(f"✅ Loaded {len(stats)} live player stats from ESPN boxscores (2025).")
+        st.success(f"✅ Loaded {len(stats)} player stat lines from ESPN live 2025 feed.")
 
     except Exception as e:
-        st.error(f"Error loading live ESPN 2025 data: {e}")
+        st.error(f"Error loading ESPN 2025 data: {e}")
         stats = pd.DataFrame(columns=[
             "player_display_name", "team", "position",
-            "stat_name", "stat_value",
-            "week", "season", "position_group"
+            "stat_name", "stat_value", "week", "season", "position_group"
         ])
 
     inj = pd.DataFrame()
