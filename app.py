@@ -22,46 +22,53 @@ def load_all(season: int):
     import streamlit as st
 
     try:
-        # Pull the ESPN player stats endpoint (reliable for live + completed games)
-        url = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/2025/types/2/statistics/players?limit=5000"
-        resp = requests.get(url)
-        resp.raise_for_status()
-        data = resp.json()
+        # ESPN season types:
+        # 1 = preseason / current
+        # 2 = regular season
+        # 3 = postseason
+        # We'll try 2 first, then fall back to 1 if 404
+        base = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl"
+        url_main = f"{base}/seasons/{season}/types/2/statistics/players?limit=5000"
+        r = requests.get(url_main)
+        if r.status_code == 404:
+            url_main = f"{base}/seasons/{season}/types/1/statistics/players?limit=5000"
+            r = requests.get(url_main)
 
-        # Gather all player stat URLs
+        r.raise_for_status()
+        data = r.json()
+
         player_urls = [p["$ref"] for p in data.get("items", [])]
         players = []
 
-        for ref in player_urls[:250]:  # Limit to first 250 for speed
-            r = requests.get(ref)
-            if r.status_code != 200:
+        for ref in player_urls[:300]:  # Limit for performance
+            sub = requests.get(ref)
+            if sub.status_code != 200:
                 continue
-            info = r.json()
+            info = sub.json()
             athlete = info.get("athlete", {})
             stats = info.get("stats", [])
 
-            player_name = athlete.get("displayName")
+            name = athlete.get("displayName")
             team = athlete.get("team", {}).get("abbreviation")
-            position = athlete.get("position", {}).get("abbreviation")
+            pos = athlete.get("position", {}).get("abbreviation")
 
-            # Map key stats
             row = {
-                "player_display_name": player_name,
+                "player_display_name": name,
                 "team": team,
-                "position": position,
+                "position": pos,
                 "rushing_yards": None,
                 "receiving_yards": None,
-                "passing_yards": None,
+                "passing_yards": None
             }
 
             for s in stats:
-                name = s.get("name", "").lower()
+                nm = s.get("name", "").lower()
                 val = s.get("value", 0)
-                if "rush" in name and "yard" in name:
+                if "rush" in nm and "yard" in nm:
                     row["rushing_yards"] = val
-                elif "rec" in name and "yard" in name:
+                elif "rec" in nm and "yard" in nm:
                     row["receiving_yards"] = val
-                elif "pass" in name and "yard" in name:
+                elif "pass" in nm and "yard" in nm:
                     row["passing_yards"] = val
 
             players.append(row)
@@ -69,13 +76,13 @@ def load_all(season: int):
         stats = pd.DataFrame(players)
 
         if stats.empty:
-            raise ValueError("No players returned from ESPN player stats API.")
+            raise ValueError("No players returned from ESPN endpoints (types 1 or 2).")
 
         stats["season"] = season
         stats["week"] = 1
         stats["position_group"] = stats["position"]
 
-        st.success(f"✅ Loaded {len(stats)} live ESPN player records for 2025 season.")
+        st.success(f"✅ Loaded {len(stats)} ESPN player records (auto-detected season type).")
 
     except Exception as e:
         st.error(f"Error loading ESPN 2025 player stats: {e}")
