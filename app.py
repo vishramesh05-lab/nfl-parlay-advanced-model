@@ -1,10 +1,10 @@
 # NFL Parlay Helper (Dual Probabilities, 2025)
-# Streamlit App – pulls live player stats from Sleeper API (2025 season)
+# Streamlit app using live Sleeper API for free NFL stats
 
+import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import streamlit as st
 from io import StringIO, BytesIO
 
 # ----------------------------
@@ -13,7 +13,7 @@ from io import StringIO, BytesIO
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA15")
+st.caption("Build: vA17")
 
 SEASON = 2025
 
@@ -43,14 +43,7 @@ def make_unique_columns(columns):
 # ----------------------------
 @st.cache_data(show_spinner=True, ttl=60 * 30)
 def load_all():
-    """
-    Load player data.
-    Priority:
-    1. Uploaded CSV (user-provided)
-    2. Sleeper API live data (free)
-    3. Return empty DataFrame if nothing works
-    """
-
+    """Load player data from uploaded CSV or Sleeper API."""
     # 1️⃣ Uploaded CSV
     if uploaded_file is not None:
         try:
@@ -65,7 +58,6 @@ def load_all():
     try:
         st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
 
-        # Fetch live stats
         stats_url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
         stats_resp = requests.get(stats_url, timeout=20)
         stats_resp.raise_for_status()
@@ -73,14 +65,9 @@ def load_all():
 
         stats_df = pd.DataFrame(stats_data).T.reset_index()
         stats_df.rename(columns={"index": "player_id"}, inplace=True)
-
-        # Deduplicate column names safely
         stats_df.columns = make_unique_columns(stats_df.columns)
-
-        # Drop duplicate player_ids
         stats_df = stats_df.drop_duplicates(subset=["player_id"], keep="first")
 
-        # Fetch player metadata
         players_url = "https://api.sleeper.app/v1/players/nfl"
         players_resp = requests.get(players_url, timeout=20)
         players_resp.raise_for_status()
@@ -90,14 +77,11 @@ def load_all():
         players_df.rename(columns={"index": "player_id"}, inplace=True)
         players_df.columns = make_unique_columns(players_df.columns)
 
-        # Select relevant columns only
         players_subset = players_df.loc[:, ["player_id", "full_name", "team", "position"]]
         players_subset = players_subset.drop_duplicates(subset=["player_id"])
 
-        # Merge safely
         merged = pd.merge(stats_df, players_subset, on="player_id", how="left")
 
-        # Rename + clean columns
         merged.rename(columns={
             "full_name": "player_display_name",
             "pts_ppr": "fantasy_points_ppr",
@@ -106,7 +90,6 @@ def load_all():
             "rec_yd": "receiving_yards"
         }, inplace=True)
 
-        # Ensure expected columns exist
         keep = [
             "player_display_name", "team", "position",
             "passing_yards", "rushing_yards", "receiving_yards",
@@ -124,21 +107,9 @@ def load_all():
         return pd.DataFrame()
 
 # ----------------------------
-# Load data
+# Load Season Data
 # ----------------------------
 stats_df = load_all()
-
-# ----------------------------
-# Ensure DataFrame Structure
-# ----------------------------
-if not isinstance(stats_df, pd.DataFrame):
-    stats_df = pd.DataFrame()
-
-required_cols = ["player_display_name", "team", "position",
-                 "passing_yards", "rushing_yards", "receiving_yards"]
-for col in required_cols:
-    if col not in stats_df.columns:
-        stats_df[col] = np.nan
 
 # ----------------------------
 # Sidebar Filters
@@ -162,7 +133,7 @@ with col2:
     under_odds = st.text_input("Under odds (e.g., -105 or +100)")
 
 # ----------------------------
-# Analyze Button
+# Analyze Button (Per-Week Breakdown)
 # ----------------------------
 if st.button("Analyze"):
     if stats_df.empty:
@@ -175,14 +146,54 @@ if st.button("Analyze"):
         ]
 
         if matches.empty:
-            st.warning("No matching player found. Try clearing filters or refining the name.")
+            st.warning("No matching player found. Try refining the name.")
         else:
-            st.success(f"✅ Found {len(matches)} records for {player_name}")
-            st.dataframe(matches.head(10))
+            st.success(f"✅ Found {len(matches)} record(s) for {player_name}")
 
-            selected_stat = stat.lower().replace(" ", "_").replace("(ppr)", "fantasy_points_ppr")
-            if selected_stat in matches.columns:
-                avg_value = matches[selected_stat].astype(float).mean()
-                st.metric(label=f"Avg {stat} (last {lookback} weeks)", value=f"{avg_value:.2f}")
-            else:
-                st.warning("Stat not found for selected player.")
+            # --- Fetch weekly stats directly from Sleeper API ---
+            try:
+                weekly_rows = []
+                for week_num in range(1, current_week + 1):
+                    url = f"https://api.sleeper.app/v1/stats/nfl/regular/{week_num}"
+                    resp = requests.get(url, timeout=20)
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    for pid, pdata in data.items():
+                        # Extract player name and stat dynamically
+                        player_id = str(pid)
+                        player_stats = pdata if isinstance(pdata, dict) else {}
+                        if not player_stats:
+                            continue
+
+                        # Match on name (from metadata if available)
+                        name_key = player_stats.get("player", "")
+                        if player_name.lower() in str(name_key).lower():
+                            # Select correct stat key
+                            if stat == "Passing Yards":
+                                key = "pass_yd"
+                            elif stat == "Rushing Yards":
+                                key = "rush_yd"
+                            elif stat == "Receiving Yards":
+                                key = "rec_yd"
+                            elif stat == "Fantasy Points (PPR)":
+                                key = "pts_ppr"
+                            else:
+                                key = None
+
+                            if key and key in player_stats:
+                                weekly_rows.append({
+                                    "week": week_num,
+                                    stat: player_stats.get(key, 0)
+                                })
+
+                if weekly_rows:
+                    week_df = pd.DataFrame(weekly_rows).sort_values("week")
+                    st.dataframe(week_df)
+                    avg_value = week_df[stat].astype(float).mean()
+                    st.metric(label=f"Avg {stat} (Weeks 1–{current_week})", value=f"{avg_value:.2f}")
+                else:
+                    st.warning(f"No weekly {stat} data found for {player_name} yet.")
+
+            except Exception as e:
+                st.error(f"Error fetching weekly data: {e}")
