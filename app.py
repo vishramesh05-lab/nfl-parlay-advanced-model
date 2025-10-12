@@ -17,37 +17,52 @@ SEASON = 2025
 
 @st.cache_data(show_spinner=True, ttl=60*60)
 def load_all(season: int):
-    import requests, pandas as pd, json
+    import pandas as pd
+    import requests
+    import streamlit as st
 
     try:
-        url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams"
-        teams = requests.get(url).json()["sports"][0]["leagues"][0]["teams"]
+        # 1️⃣ Get current NFL week from Sleeper
+        state = requests.get("https://api.sleeper.app/v1/state/nfl").json()
+        current_week = int(state.get("week", 1))
 
-        players = []
-        for t in teams:
-            team_abbr = t["team"]["abbreviation"]
-            team_id = t["team"]["id"]
+        # 2️⃣ Pull multiple recent weeks (for trend analysis)
+        all_weeks = list(range(max(1, current_week - 5), current_week + 1))
+        frames = []
 
-            roster_url = f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{team_id}/roster"
-            roster = requests.get(roster_url).json()
-            for a in roster.get("athletes", []):
-                p = a["athlete"]
-                stats = a.get("stats", [{}])[0]
-                players.append({
-                    "player_display_name": p["displayName"],
-                    "team": team_abbr,
-                    "position": p.get("position", {}).get("abbreviation", ""),
-                    "season": 2025,
-                    "week": stats.get("week", "N/A"),
-                    "passing_yards": stats.get("passingYards", 0),
-                    "rushing_yards": stats.get("rushingYards", 0),
-                    "receiving_yards": stats.get("receivingYards", 0)
-                })
+        for w in all_weeks:
+            url = f"https://api.sleeper.app/v1/stats/nfl/regular/{season}/{w}"
+            resp = requests.get(url)
+            if resp.status_code != 200:
+                continue
+            week_data = resp.json()
+            df = pd.DataFrame(week_data.values())
+            if not df.empty:
+                df["week"] = w
+                frames.append(df)
 
-        stats = pd.DataFrame(players)
-        st.success(f"Loaded {len(stats)} live 2025 players from ESPN feed.")
+        if not frames:
+            raise ValueError("No data returned from Sleeper for 2025.")
+
+        stats = pd.concat(frames, ignore_index=True)
+
+        # 3️⃣ Normalize and clean
+        stats.rename(columns={
+            "player_name": "player_display_name",
+            "team": "team",
+            "pos": "position",
+            "rushing_yd": "rushing_yards",
+            "receiving_yd": "receiving_yards",
+            "passing_yd": "passing_yards",
+        }, inplace=True, errors="ignore")
+
+        stats["season"] = season
+        stats.dropna(subset=["player_display_name"], inplace=True)
+
+        st.success(f"Loaded {len(stats)} live player records for Weeks {all_weeks[0]}–{all_weeks[-1]} (2025).")
+
     except Exception as e:
-        st.error(f"Error loading ESPN 2025 live data: {e}")
+        st.error(f"Error loading Sleeper 2025 data: {e}")
         stats = pd.DataFrame()
 
     inj = pd.DataFrame()
