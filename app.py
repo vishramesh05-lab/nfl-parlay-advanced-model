@@ -69,7 +69,41 @@ def load_all(season: int):
     return stats, inj, depth, sched
 with st.spinner("Loading nflverse data..."):
     stats_df, inj_df, depth_df, sched_df = load_all(SEASON)
+# --- Normalize/ensure a 'week' column exists -------------------------------
+wk_col = None
+if "week" in stats_df.columns:
+    wk_col = "week"
+else:
+    # try case-insensitive or alternate names
+    for c in stats_df.columns:
+        if c.lower() == "week":
+            wk_col = c
+            break
+    if wk_col is None and "game_week" in stats_df.columns:
+        wk_col = "game_week"
 
+# if we found an alternate, rename it to 'week'
+if wk_col and wk_col != "week":
+    stats_df = stats_df.rename(columns={wk_col: "week"})
+
+# last resort: derive from schedules if both have game_id
+if "week" not in stats_df.columns and not sched_df.empty:
+    if "game_id" in stats_df.columns and "game_id" in sched_df.columns and "week" in sched_df.columns:
+        try:
+            stats_df = stats_df.merge(
+                sched_df[["game_id", "week", "season"]],
+                on="game_id",
+                how="left",
+                suffixes=("", "_sched"),
+            )
+        except Exception:
+            pass
+
+# If we STILL don’t have 'week', stop with a friendly message
+if "week" not in stats_df.columns:
+    st.error("Your current data source didn’t return a 'week' column. Please try again in a bit, or switch to another branch/repo version.")
+    st.stop()
+# ---------------------------------------------------------------------------
 if stats_df is None or stats_df.empty:
     st.error("Player-week stats are not available right now. Try again later or check your season/week settings.")
     st.stop()
