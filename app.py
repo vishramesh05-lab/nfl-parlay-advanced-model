@@ -61,43 +61,46 @@ def load_all():
     try:
         st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
         url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+            st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
 
-        if isinstance(data, dict) and len(data) > 0:
-            # Convert dict → DataFrame
-            df = pd.DataFrame(data).T.reset_index(names=["player_id"])
+    # 1. Fetch live stats
+    stats_url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
+    stats_resp = requests.get(stats_url, timeout=20)
+    stats_resp.raise_for_status()
+    stats_data = stats_resp.json()
 
-            # Rename key columns
-            rename_map = {
-                "pts_ppr": "fantasy_points_ppr",
-                "pass_yd": "passing_yards",
-                "rush_yd": "rushing_yards",
-                "rec_yd": "receiving_yards",
-                "team": "team",
-                "player": "player_display_name",
-                "pos": "position"
-            }
-            df.rename(columns=rename_map, inplace=True)
+    # 2. Fetch player directory (names, positions, teams)
+    players_url = "https://api.sleeper.app/v1/players/nfl"
+    players_resp = requests.get(players_url, timeout=20)
+    players_resp.raise_for_status()
+    players_data = players_resp.json()
 
-            # Ensure necessary columns exist
-            keep = ["player_display_name", "team", "position",
-                    "passing_yards", "rushing_yards", "receiving_yards",
-                    "fantasy_points_ppr"]
-            for col in keep:
-                if col not in df.columns:
-                    df[col] = np.nan
+    # 3. Convert stats and players to DataFrames
+    stats_df = pd.DataFrame(stats_data).T.reset_index(names=["player_id"])
+    players_df = pd.DataFrame(players_data).T.reset_index(names=["player_id"])
 
-            st.success(f"✅ Loaded {len(df)} live player rows from Sleeper (2025)")
-            return df[keep]
-        else:
-            st.warning("⚠️ Sleeper API returned no data.")
-            return pd.DataFrame()
+    # 4. Merge on player_id to attach display names
+    merged = stats_df.merge(players_df[["player_id", "full_name", "team", "position"]],
+                            on="player_id", how="left")
 
-    except Exception as e:
-        st.error(f"Error loading Sleeper 2025 live data: {e}")
-        return pd.DataFrame()
+    # 5. Rename + clean columns
+    merged.rename(columns={
+        "full_name": "player_display_name",
+        "pts_ppr": "fantasy_points_ppr",
+        "pass_yd": "passing_yards",
+        "rush_yd": "rushing_yards",
+        "rec_yd": "receiving_yards"
+    }, inplace=True)
+
+    keep = ["player_display_name", "team", "position",
+            "passing_yards", "rushing_yards", "receiving_yards", "fantasy_points_ppr"]
+
+    for col in keep:
+        if col not in merged.columns:
+            merged[col] = np.nan
+
+    st.success(f"✅ Loaded {len(merged)} live players (2025) with full names from Sleeper API.")
+    return merged[keep]
 
 # ----------------------------
 # Load data
