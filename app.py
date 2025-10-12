@@ -8,7 +8,7 @@ from utils import (
     pace_factor, usage_trend_factor, vig_to_market_prob, context_adjusted_probability,
     POS_FOR_STAT
 )
-
+# DEBUG_MARKER
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig. For informational/educational use only.")
@@ -73,7 +73,7 @@ with st.spinner("Loading nflverse data..."):
 import pandas as pd
 import numpy as np
 
-# Ensure both objects are DataFrames
+# Defensive: make sure stats_df and sched_df are DataFrames
 if not isinstance(stats_df, pd.DataFrame):
     try:
         stats_df = pd.DataFrame(stats_df)
@@ -86,26 +86,28 @@ if not isinstance(sched_df, pd.DataFrame):
     except Exception:
         sched_df = pd.DataFrame()
 
-# Make all column names strings
+# Force all column names to strings
 stats_df.columns = [str(c) for c in stats_df.columns]
-if not sched_df.empty:
-    sched_df.columns = [str(c) for c in sched_df.columns]
+sched_df.columns = [str(c) for c in sched_df.columns]
 
-# Find/rename a usable week column
-wk_col = "week" if "week" in stats_df.columns else None
-if wk_col is None:
-    for c in stats_df.columns:
-        if str(c).lower() == "week":
-            wk_col = c
-            break
-    if wk_col is None and "game_week" in stats_df.columns:
-        wk_col = "game_week"
+# Find or create 'week' column
+wk_col = None
+for c in stats_df.columns:
+    if str(c).lower() == "week":
+        wk_col = c
+        break
 if wk_col and wk_col != "week":
     stats_df = stats_df.rename(columns={wk_col: "week"})
 
-# Try to merge week from schedules if still missing
-if "week" not in stats_df.columns and not sched_df.empty:
-    if all(col in sched_df.columns for col in ["game_id", "week"]) and "game_id" in stats_df.columns:
+# Try merging week from schedules
+if "week" not in stats_df.columns:
+    if (
+        isinstance(sched_df, pd.DataFrame)
+        and not getattr(sched_df, "empty", True)
+        and "game_id" in stats_df.columns
+        and "game_id" in sched_df.columns
+        and "week" in sched_df.columns
+    ):
         try:
             stats_df = stats_df.merge(
                 sched_df[["game_id", "week"]],
@@ -116,11 +118,10 @@ if "week" not in stats_df.columns and not sched_df.empty:
         except Exception:
             pass
 
-# Last resort: create an empty week column so UI won’t crash
+# Still missing? Add empty week column
 if "week" not in stats_df.columns:
     stats_df["week"] = np.nan
 # ---------------------------------------------------------------------------
-
 # --- Normalize team/opponent columns ---------------------------------------
 # team
 if "team" not in stats_df.columns:
