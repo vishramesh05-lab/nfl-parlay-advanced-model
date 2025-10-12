@@ -13,7 +13,7 @@ from io import StringIO, BytesIO
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA13")
+st.caption("Build: vA14")
 
 SEASON = 2025
 
@@ -56,15 +56,17 @@ def load_all():
         stats_resp.raise_for_status()
         stats_data = stats_resp.json()
 
-        # Convert stats to DataFrame and flatten properly
-        stats_df = pd.json_normalize(stats_data).T.reset_index()
-        stats_df.rename(columns={"index": "player_id", 0: "stat_value"}, inplace=True)
+        # Convert stats JSON to DataFrame and flatten
+        stats_df = pd.DataFrame(stats_data).T.reset_index()
+        stats_df.rename(columns={"index": "player_id"}, inplace=True)
 
-        # Because json_normalize() creates nested paths, we drop duplicates just in case
+        # Drop duplicate columns
         stats_df = stats_df.loc[:, ~stats_df.columns.duplicated()].copy()
-        stats_df.drop_duplicates(subset=["player_id"], inplace=True)
 
-        # Fetch player metadata (names, teams, positions)
+        # If there are multiple rows per player_id, keep only first
+        stats_df = stats_df.drop_duplicates(subset=["player_id"], keep="first")
+
+        # Fetch player metadata
         players_url = "https://api.sleeper.app/v1/players/nfl"
         players_resp = requests.get(players_url, timeout=20)
         players_resp.raise_for_status()
@@ -73,18 +75,14 @@ def load_all():
         players_df = pd.DataFrame(players_data).T.reset_index()
         players_df.rename(columns={"index": "player_id"}, inplace=True)
 
-        # Select relevant player columns
-        players_subset = players_df.loc[:, ["player_id", "full_name", "team", "position"]]
-        players_subset = players_subset.drop_duplicates(subset=["player_id"])
+        # Drop duplicate columns in players_df too
+        players_df = players_df.loc[:, ~players_df.columns.duplicated()].copy()
 
-        # Merge safely with unique player_id
-        merged = pd.merge(
-            stats_df,
-            players_subset,
-            on="player_id",
-            how="left",
-            validate="1:1"
-        )
+        # Select only relevant columns
+        players_subset = players_df[["player_id", "full_name", "team", "position"]].drop_duplicates(subset=["player_id"])
+
+        # Merge safely
+        merged = pd.merge(stats_df, players_subset, on="player_id", how="left")
 
         # Rename + clean columns
         merged.rename(columns={
@@ -95,7 +93,7 @@ def load_all():
             "rec_yd": "receiving_yards"
         }, inplace=True)
 
-        # Add expected columns if missing
+        # Ensure expected columns
         keep = [
             "player_display_name", "team", "position",
             "passing_yards", "rushing_yards", "receiving_yards",
@@ -104,6 +102,9 @@ def load_all():
         for col in keep:
             if col not in merged.columns:
                 merged[col] = np.nan
+
+        # Final cleanup of non-unique column names
+        merged.columns = pd.io.parsers.ParserBase({'names': merged.columns})._maybe_dedup_names(merged.columns)
 
         st.success(f"✅ Loaded {len(merged)} unique live players (2025) with full names from Sleeper API.")
         return merged[keep]
