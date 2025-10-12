@@ -105,6 +105,28 @@ if "week" not in stats_df.columns:
     st.error("Your current data source didn’t return a 'week' column. Please try again in a bit, or switch to another branch/repo version.")
     st.stop()
 # ---------------------------------------------------------------------------
+# --- Normalize team/opponent columns ---------------------------------------
+import numpy as np
+
+# ensure all column names are strings (again, safe)
+stats_df.columns = [str(c) for c in stats_df.columns]
+
+# team
+if "team" not in stats_df.columns:
+    if "recent_team" in stats_df.columns:
+        stats_df = stats_df.rename(columns={"recent_team": "team"})
+    elif "team_abbr" in stats_df.columns:
+        stats_df = stats_df.rename(columns={"team_abbr": "team"})
+    else:
+        stats_df["team"] = "UNK"
+
+# opponent_team
+if "opponent_team" not in stats_df.columns:
+    if "opponent" in stats_df.columns:
+        stats_df["opponent_team"] = stats_df["opponent"]
+    else:
+        stats_df["opponent_team"] = np.nan
+# ---------------------------------------------------------------------------
 if stats_df is None or stats_df.empty:
     st.error("Player-week stats are not available right now. Try again later or check your season/week settings.")
     st.stop()
