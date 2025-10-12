@@ -17,35 +17,39 @@ SEASON = 2025
 
 @st.cache_data(show_spinner=True, ttl=60*60)
 def load_all(season: int):
-    # Try nflreadpy first; fallback to nfl_data_py
-    stats = inj = depth = sched = None
+    import requests
+    import pandas as pd
+
     try:
-        import nflreadpy as nfl
-        try: stats = nfl.load_player_stats(seasons=[season], summary_level="week")
-        except Exception: stats = None
-        try: inj = nfl.load_injuries(seasons=[season])
-        except Exception: inj = None
-        try: depth = nfl.load_depth_charts(seasons=[season])
-        except Exception: depth = None
-        try: sched = nfl.load_schedules(seasons=[season])
-        except Exception: sched = None
-    except Exception:
-        pass
-    if stats is None:
-        try:
-            import nfl_data_py as nd
-            stats = nd.import_weekly_data([season])
-            inj   = inj   if inj   is not None else nd.import_injuries([season])
-            depth = depth if depth is not None else nd.import_depth_charts([season])
-            sched = sched if sched is not None else nd.import_schedules([season])
-        except Exception:
-            stats = None
-    # Return valid DataFrames
-    if stats is None: stats = pd.DataFrame()
-    if inj   is None: inj   = pd.DataFrame()
-    if depth is None: depth = pd.DataFrame()
-    if sched is None: sched = pd.DataFrame()
-    stats = ensure_cols(stats)
+        url = f"https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/statistics/byplayer?region=us&lang=en&contentorigin=espn&season={season}"
+        response = requests.get(url)
+        data = response.json()
+
+        # Parse the ESPN response
+        players = []
+        for cat in data.get("categories", []):
+            for stat in cat.get("stats", []):
+                player = stat.get("athlete", {})
+                stats = stat.get("stats", {})
+                players.append({
+                    "player_display_name": player.get("displayName", "Unknown"),
+                    "team": player.get("team", {}).get("abbreviation", "UNK"),
+                    "position": player.get("position", {}).get("abbreviation", ""),
+                    "rushing_yards": stats.get("rushingYards", 0),
+                    "receiving_yards": stats.get("receivingYards", 0),
+                    "passing_yards": stats.get("passingYards", 0),
+                    "touchdowns": stats.get("touchdowns", 0)
+                })
+
+        stats = pd.DataFrame(players)
+    except Exception as e:
+        st.error(f"ESPN data fetch failed: {e}")
+        stats = pd.DataFrame()
+
+    inj = pd.DataFrame()
+    depth = pd.DataFrame()
+    sched = pd.DataFrame()
+
     return stats, inj, depth, sched
 
 with st.spinner("Loading nflverse data..."):
