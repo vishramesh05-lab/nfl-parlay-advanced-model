@@ -22,70 +22,47 @@ def load_all(season: int):
     import streamlit as st
 
     try:
-        # Get current week
-        state = requests.get("https://api.sleeper.app/v1/state/nfl").json()
-        current_week = int(state.get("week", 1))
+        # ✅ ESPN 2025 live endpoint (no key needed)
+        url = f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/statistics"
+        resp = requests.get(url)
+        data = resp.json()
 
-        all_weeks = list(range(max(1, current_week - 5), current_week + 1))
-        frames = []
+        # Extract player stat entries
+        players = []
+        for category in data.get("categories", []):
+            for stat in category.get("stats", []):
+                for athlete in stat.get("athletes", []):
+                    player = athlete.get("athlete", {})
+                    stats = athlete.get("stats", {})
+                    players.append({
+                        "player_display_name": player.get("displayName"),
+                        "team": player.get("team", {}).get("abbreviation"),
+                        "position": player.get("position", {}).get("abbreviation"),
+                        "stat_name": stat.get("name"),
+                        "stat_value": stats.get("value", 0)
+                    })
 
-        # Use Sleeper PROJECTIONS (always populated)
-        for w in all_weeks:
-            url = f"https://api.sleeper.app/v1/projections/nfl/{season}/{w}"
-            r = requests.get(url)
-            if r.status_code != 200:
-                continue
-            week_data = r.json()
-            df = pd.DataFrame(week_data)
-            if not df.empty:
-                df["week"] = w
-                frames.append(df)
+        stats = pd.DataFrame(players)
 
-        if not frames:
-            raise ValueError("No player data returned from Sleeper projections.")
+        if stats.empty:
+            raise ValueError("No player data returned from ESPN live stats.")
 
-        stats = pd.concat(frames, ignore_index=True)
+        # Basic normalization
+        stats.rename(columns={
+            "stat_value": "value",
+        }, inplace=True)
 
-        # Normalize and fill columns
-        rename_map = {
-            "player_id": "player_id",
-            "player": "player_display_name",
-            "team": "team",
-            "position": "position",
-            "stats.passing_yards": "passing_yards",
-            "stats.rushing_yards": "rushing_yards",
-            "stats.receiving_yards": "receiving_yards",
-        }
-
-        # Flatten nested dicts safely
-        flat_rows = []
-        for _, row in stats.iterrows():
-            base = {
-                "player_display_name": row.get("player", {}).get("full_name", None)
-                if isinstance(row.get("player"), dict) else row.get("player", None),
-                "team": row.get("team", None),
-                "position": row.get("position", None),
-                "week": row.get("week", None),
-            }
-            s = row.get("stats", {})
-            if isinstance(s, dict):
-                base["passing_yards"] = s.get("pass_yd", 0)
-                base["rushing_yards"] = s.get("rush_yd", 0)
-                base["receiving_yards"] = s.get("rec_yd", 0)
-            flat_rows.append(base)
-
-        stats = pd.DataFrame(flat_rows)
         stats["season"] = season
+        stats["week"] = 1  # ESPN doesn’t use weeks, so set placeholder
         stats["position_group"] = stats["position"]
 
-        stats.dropna(subset=["player_display_name"], inplace=True)
-        st.success(f"✅ Loaded {len(stats)} live 2025 player projections for Weeks {all_weeks[0]}–{all_weeks[-1]}.")
+        st.success(f"✅ Loaded {len(stats)} player records from ESPN Live (2025).")
 
     except Exception as e:
-        st.error(f"Error loading Sleeper projections: {e}")
+        st.error(f"Error loading ESPN 2025 live data: {e}")
         stats = pd.DataFrame(columns=[
-            "player_display_name", "team", "position", "rushing_yards",
-            "receiving_yards", "passing_yards", "week", "season", "position_group"
+            "player_display_name", "team", "position",
+            "value", "stat_name", "week", "season", "position_group"
         ])
 
     inj = pd.DataFrame()
