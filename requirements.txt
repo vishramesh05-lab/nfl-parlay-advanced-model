@@ -2,6 +2,7 @@ streamlit>=1.36
 pandas>=2.0.0
 numpy>=1.26.0
 requests>=2.31.0
-nflreadpy
 pyarrow>=15.0.0
 scipy>=1.11.0
+nflreadpy
+nfl_data_py>=0.3.0
