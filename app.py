@@ -70,29 +70,45 @@ def load_all(season: int):
 with st.spinner("Loading nflverse data..."):
     stats_df, inj_df, depth_df, sched_df = load_all(SEASON)
 # --- Normalize/ensure a 'week' column exists -------------------------------
-stats_df.columns = [str(c) for c in stats_df.columns]  # ensure all column names are strings
-wk_col = None
-if "week" in stats_df.columns:
-    wk_col = "week"
-else:
-    # try case-insensitive or alternate names
+import pandas as pd
+import numpy as np
+
+# Ensure both objects are DataFrames
+if not isinstance(stats_df, pd.DataFrame):
+    try:
+        stats_df = pd.DataFrame(stats_df)
+    except Exception:
+        stats_df = pd.DataFrame()
+
+if not isinstance(sched_df, pd.DataFrame):
+    try:
+        sched_df = pd.DataFrame(sched_df)
+    except Exception:
+        sched_df = pd.DataFrame()
+
+# Make all column names strings
+stats_df.columns = [str(c) for c in stats_df.columns]
+if not sched_df.empty:
+    sched_df.columns = [str(c) for c in sched_df.columns]
+
+# Find/rename a usable week column
+wk_col = "week" if "week" in stats_df.columns else None
+if wk_col is None:
     for c in stats_df.columns:
-        if c.lower() == "week":
+        if str(c).lower() == "week":
             wk_col = c
             break
     if wk_col is None and "game_week" in stats_df.columns:
         wk_col = "game_week"
-
-# if we found an alternate, rename it to 'week'
 if wk_col and wk_col != "week":
     stats_df = stats_df.rename(columns={wk_col: "week"})
 
-# last resort: derive from schedules if both have game_id
-if "week" not in stats_df.columns and isinstance(sched_df, pd.DataFrame) and not sched_df.empty:
-    if "game_id" in stats_df.columns and "game_id" in sched_df.columns and "week" in sched_df.columns:
+# Try to merge week from schedules if still missing
+if "week" not in stats_df.columns and not sched_df.empty:
+    if all(col in sched_df.columns for col in ["game_id", "week"]) and "game_id" in stats_df.columns:
         try:
             stats_df = stats_df.merge(
-                sched_df[["game_id", "week", "season"]],
+                sched_df[["game_id", "week"]],
                 on="game_id",
                 how="left",
                 suffixes=("", "_sched"),
@@ -100,10 +116,40 @@ if "week" not in stats_df.columns and isinstance(sched_df, pd.DataFrame) and not
         except Exception:
             pass
 
-# If we STILL don’t have 'week', stop with a friendly message
+# Last resort: create an empty week column so UI won’t crash
 if "week" not in stats_df.columns:
-    st.error("Your current data source didn’t return a 'week' column. Please try again in a bit, or switch to another branch/repo version.")
-    st.stop()
+    stats_df["week"] = np.nan
+# ---------------------------------------------------------------------------
+
+# --- Normalize team/opponent columns ---------------------------------------
+# team
+if "team" not in stats_df.columns:
+    if "recent_team" in stats_df.columns:
+        stats_df = stats_df.rename(columns={"recent_team": "team"})
+    elif "team_abbr" in stats_df.columns:
+        stats_df = stats_df.rename(columns={"team_abbr": "team"})
+    else:
+        stats_df["team"] = "UNK"
+
+# opponent_team
+if "opponent_team" not in stats_df.columns:
+    if "opponent" in stats_df.columns:
+        stats_df["opponent_team"] = stats_df["opponent"]
+    else:
+        stats_df["opponent_team"] = np.nan
+# ---------------------------------------------------------------------------
+
+# --- Build weeks list safely -----------------------------------------------
+try:
+    weeks = pd.to_numeric(stats_df["week"], errors="coerce").dropna().astype(int).unique().tolist()
+    weeks = sorted(list(set(weeks)))
+except Exception:
+    weeks = []
+
+if not weeks:
+    # Safe fallback so the app renders even if the source didn't provide week values yet
+    weeks = list(range(1, 19))  # 1..18 regular season
+wmin, wmax = int(min(weeks)), int(max(weeks))
 # ---------------------------------------------------------------------------
 # --- Normalize team/opponent columns ---------------------------------------
 import numpy as np
