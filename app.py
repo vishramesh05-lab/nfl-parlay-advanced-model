@@ -1,6 +1,7 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
+import streamlit as st
 from utils import (
     ensure_cols, last_n_window, prob_over_normal, stat_label_and_col,
     TEAM_LATLON, fetch_weather, injury_flag_for_player, opponent_def_injuries,
