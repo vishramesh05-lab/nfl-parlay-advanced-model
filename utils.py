@@ -29,26 +29,55 @@ NUMERIC_COLS = [
     "targets","air_yards","fantasy_points_ppr"
 ]
 
-def ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_cols(df):
+    import pandas as pd
+    import numpy as np
+
+    # Safety: accept None, lists, dicts, Arrow tables, etc.
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            return pd.DataFrame()
     df = df.copy()
+
+    NUMERIC_COLS = [
+        "passing_yards","passing_tds","interceptions",
+        "rushing_yards","rushing_tds",
+        "receptions","receiving_yards","receiving_tds",
+        "targets","air_yards","fantasy_points_ppr"
+    ]
     for c in NUMERIC_COLS:
         if c not in df.columns:
             df[c] = 0.0
+
+    # Normalize common column name differences
     if "recent_team" in df.columns and "team" not in df.columns:
         df = df.rename(columns={"recent_team":"team"})
     if "opponent_team" not in df.columns and "opponent" in df.columns:
         df["opponent_team"] = df["opponent"]
+
+    # Player name
     if "player_display_name" not in df.columns:
         if "player_name" in df.columns:
             df["player_display_name"] = df["player_name"]
+        elif "player" in df.columns:
+            df["player_display_name"] = df["player"]
         else:
-            df["player_display_name"] = df.get("player", "Unknown")
+            df["player_display_name"] = "Unknown"
+
+    # Position & group
     if "position" not in df.columns:
-        df["position"] = df.get("pos","UNK")
+        df["position"] = df["pos"] if "pos" in df.columns else "UNK"
     if "position_group" not in df.columns:
         df["position_group"] = df["position"].astype(str).str.replace(r"\d+","", regex=True)
+
+    # Team
     if "team" not in df.columns:
-        df["team"] = df.get("team_abbr","UNK")
+        df["team"] = df["team_abbr"] if "team_abbr" in df.columns else "UNK"
+
     return df
 
 def last_n_window(df: pd.DataFrame, player_name: str, n: int, week_max: Optional[int]=None) -> pd.DataFrame:
