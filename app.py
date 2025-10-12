@@ -17,41 +17,37 @@ SEASON = 2025
 
 @st.cache_data(show_spinner=True, ttl=60*60)
 def load_all(season: int):
-    import requests
     import pandas as pd
+    import streamlit as st
 
     try:
-        url = f"https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/statistics/byplayer?region=us&lang=en&contentorigin=espn&season={season}"
-        response = requests.get(url)
-        data = response.json()
+        # nflfastR open data: weekly player stats
+        url = f"https://github.com/nflverse/nflfastR-data/blob/master/data/player_stats/player_stats_{season}.csv.gz?raw=true"
+        stats = pd.read_csv(url, compression="gzip")
 
-        # Parse the ESPN response
-        players = []
-        for cat in data.get("categories", []):
-            for stat in cat.get("stats", []):
-                player = stat.get("athlete", {})
-                stats = stat.get("stats", {})
-                players.append({
-                    "player_display_name": player.get("displayName", "Unknown"),
-                    "team": player.get("team", {}).get("abbreviation", "UNK"),
-                    "position": player.get("position", {}).get("abbreviation", ""),
-                    "rushing_yards": stats.get("rushingYards", 0),
-                    "receiving_yards": stats.get("receivingYards", 0),
-                    "passing_yards": stats.get("passingYards", 0),
-                    "touchdowns": stats.get("touchdowns", 0)
-                })
+        # Normalize columns to your app’s format
+        stats.rename(columns={
+            "player_name": "player_display_name",
+            "recent_team": "team",
+            "position": "position",
+            "rushing_yards": "rushing_yards",
+            "receiving_yards": "receiving_yards",
+            "passing_yards": "passing_yards",
+            "season": "season",
+            "week": "week"
+        }, inplace=True, errors="ignore")
 
-        stats = pd.DataFrame(players)
+        # Drop duplicates & NaNs
+        stats.dropna(subset=["player_display_name"], inplace=True)
     except Exception as e:
-        st.error(f"ESPN data fetch failed: {e}")
+        st.error(f"Error loading nflfastR data: {e}")
         stats = pd.DataFrame()
 
+    # Empty placeholders to keep same structure
     inj = pd.DataFrame()
     depth = pd.DataFrame()
     sched = pd.DataFrame()
-
     return stats, inj, depth, sched
-
 with st.spinner("Loading nflverse data..."):
     stats_df, inj_df, depth_df, sched_df = load_all(SEASON)
 
