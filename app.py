@@ -17,21 +17,55 @@ SEASON = 2025
 
 @st.cache_data(show_spinner=True, ttl=60*60)
 def load_all(season: int):
-    import nflreadpy as nfl
-    stats = nfl.load_player_stats(seasons=[season], summary_level="week")
-    stats = ensure_cols(stats)
+    # Try nflreadpy first; if unavailable/old, fall back to nfl_data_py
+    stats = inj = depth = sched = None
+
     try:
-        inj = nfl.load_injuries(seasons=[season])
+        import nflreadpy as nfl
+        try:
+            # Newer nflreadpy API
+            stats = nfl.load_player_stats(seasons=[season], summary_level="week")
+        except Exception:
+            stats = None
+        try:
+            inj = nfl.load_injuries(seasons=[season])
+        except Exception:
+            inj = None
+        try:
+            depth = nfl.load_depth_charts(seasons=[season])
+        except Exception:
+            depth = None
+        try:
+            sched = nfl.load_schedules(seasons=[season])
+        except Exception:
+            sched = None
     except Exception:
+        pass
+
+    # Fallback to nfl_data_py if needed
+    if stats is None:
+        try:
+            import nfl_data_py as nd
+            stats = nd.import_weekly_data([season])
+            inj = inj if inj is not None else nd.import_injuries([season])
+            depth = depth if depth is not None else nd.import_depth_charts([season])
+            sched = sched if sched is not None else nd.import_schedules([season])
+        except Exception:
+            stats = None
+
+    # Final safety: return empty DataFrames if any are still None
+    import pandas as pd
+    if stats is None:
+        stats = pd.DataFrame()
+    if inj is None:
         inj = pd.DataFrame()
-    try:
-        depth = nfl.load_depth_charts(seasons=[season])
-    except Exception:
+    if depth is None:
         depth = pd.DataFrame()
-    try:
-        sched = nfl.load_schedules(seasons=[season])
-    except Exception:
+    if sched is None:
         sched = pd.DataFrame()
+
+    # Normalize columns & return
+    stats = ensure_cols(stats)
     return stats, inj, depth, sched
 
 with st.spinner("Loading nflverse data..."):
