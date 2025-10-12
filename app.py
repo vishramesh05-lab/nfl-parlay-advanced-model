@@ -23,7 +23,6 @@ def load_all(season: int):
     try:
         import nflreadpy as nfl
         try:
-            # Newer nflreadpy API
             stats = nfl.load_player_stats(seasons=[season], summary_level="week")
         except Exception:
             stats = None
@@ -67,7 +66,6 @@ def load_all(season: int):
     # Normalize columns & return
     stats = ensure_cols(stats)
     return stats, inj, depth, sched
-
 with st.spinner("Loading nflverse data..."):
     stats_df, inj_df, depth_df, sched_df = load_all(SEASON)
 
