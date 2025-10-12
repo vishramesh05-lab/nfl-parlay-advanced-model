@@ -70,7 +70,7 @@ with st.spinner("Loading nflverse data..."):
     stats_df, inj_df, depth_df, sched_df = load_all(SEASON)
 
 if stats_df is None or stats_df.empty:
-    st.error("Could not load stats at the moment.")
+    st.error("Player-week stats are not available right now. Try again later or check your season/week settings.")
     st.stop()
 
 weeks = sorted(stats_df["week"].dropna().unique().tolist())
