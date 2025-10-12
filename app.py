@@ -13,7 +13,7 @@ from io import StringIO, BytesIO
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA12")
+st.caption("Build: vA13")
 
 SEASON = 2025
 
@@ -50,34 +50,43 @@ def load_all():
     try:
         st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
 
-        # 1. Fetch live stats
+        # Fetch live stats
         stats_url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
         stats_resp = requests.get(stats_url, timeout=20)
         stats_resp.raise_for_status()
         stats_data = stats_resp.json()
 
-        # 2. Fetch player directory (names, positions, teams)
+        # Convert stats to DataFrame and flatten properly
+        stats_df = pd.json_normalize(stats_data).T.reset_index()
+        stats_df.rename(columns={"index": "player_id", 0: "stat_value"}, inplace=True)
+
+        # Because json_normalize() creates nested paths, we drop duplicates just in case
+        stats_df = stats_df.loc[:, ~stats_df.columns.duplicated()].copy()
+        stats_df.drop_duplicates(subset=["player_id"], inplace=True)
+
+        # Fetch player metadata (names, teams, positions)
         players_url = "https://api.sleeper.app/v1/players/nfl"
         players_resp = requests.get(players_url, timeout=20)
         players_resp.raise_for_status()
         players_data = players_resp.json()
 
-        # 3. Convert stats and players to DataFrames
-        stats_df = pd.DataFrame(stats_data).T
-        stats_df.reset_index(inplace=True)
-        stats_df.rename(columns={"index": "player_id"}, inplace=True)
-
-        players_df = pd.DataFrame(players_data).T
-        players_df.reset_index(inplace=True)
+        players_df = pd.DataFrame(players_data).T.reset_index()
         players_df.rename(columns={"index": "player_id"}, inplace=True)
 
-        # 4. Select relevant columns from players_df (avoid duplicate player_id)
+        # Select relevant player columns
         players_subset = players_df.loc[:, ["player_id", "full_name", "team", "position"]]
+        players_subset = players_subset.drop_duplicates(subset=["player_id"])
 
-        # 5. Merge safely
-        merged = pd.merge(stats_df, players_subset, on="player_id", how="left", validate="1:1")
+        # Merge safely with unique player_id
+        merged = pd.merge(
+            stats_df,
+            players_subset,
+            on="player_id",
+            how="left",
+            validate="1:1"
+        )
 
-        # 6. Rename + clean columns
+        # Rename + clean columns
         merged.rename(columns={
             "full_name": "player_display_name",
             "pts_ppr": "fantasy_points_ppr",
@@ -86,17 +95,17 @@ def load_all():
             "rec_yd": "receiving_yards"
         }, inplace=True)
 
+        # Add expected columns if missing
         keep = [
             "player_display_name", "team", "position",
             "passing_yards", "rushing_yards", "receiving_yards",
             "fantasy_points_ppr"
         ]
-
         for col in keep:
             if col not in merged.columns:
                 merged[col] = np.nan
 
-        st.success(f"✅ Loaded {len(merged)} live players (2025) with full names from Sleeper API.")
+        st.success(f"✅ Loaded {len(merged)} unique live players (2025) with full names from Sleeper API.")
         return merged[keep]
 
     except Exception as e:
@@ -150,7 +159,6 @@ if st.button("Analyze"):
     elif player_name.strip() == "":
         st.warning("Enter a player name first.")
     else:
-        # Filter for matching player
         matches = stats_df[
             stats_df["player_display_name"].astype(str).str.contains(player_name, case=False, na=False)
         ]
@@ -161,7 +169,6 @@ if st.button("Analyze"):
             st.success(f"✅ Found {len(matches)} records for {player_name}")
             st.dataframe(matches.head(10))
 
-            # Display basic stat summary
             selected_stat = stat.lower().replace(" ", "_").replace("(ppr)", "fantasy_points_ppr")
             if selected_stat in matches.columns:
                 avg_value = matches[selected_stat].astype(float).mean()
