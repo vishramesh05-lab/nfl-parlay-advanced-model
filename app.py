@@ -16,6 +16,14 @@ st.caption("Build: vA8")
 SEASON = 2025
 
 @st.cache_data(show_spinner=True, ttl=60*30)
+# ---------- CSV uploader (place near top of app.py) ----------
+st.sidebar.markdown("### Upload 2025 player CSV (optional)")
+uploaded_file = st.sidebar.file_uploader("Upload CSV with 2025 player stats", type=["csv"])
+if uploaded_file is not None:
+    # Save uploaded bytes into session_state so load_all can access
+    st.session_state["uploaded_csv"] = uploaded_file
+    st.sidebar.success("CSV loaded (will be used instead of live API).")
+# ------------------------------------------------------------
 def load_all(season: int):
     """
     Load player data. Priority:
