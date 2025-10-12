@@ -17,73 +17,127 @@ SEASON = 2025
 
 @st.cache_data(show_spinner=True, ttl=60*30)
 def load_all(season: int):
+    """
+    Load player data. Priority:
+      1) Use user-uploaded CSV (Streamlit file_uploader).
+      2) Try ESPN scoreboard boxscore feed (best-effort).
+      3) Return empty dataframes if nothing found.
+    CSV must contain at minimum columns:
+      player_display_name, team, position, week, passing_yards, rushing_yards, receiving_yards
+    """
     import pandas as pd
     import requests
     import streamlit as st
+    from io import StringIO, BytesIO
 
+    # 1) Check for uploaded file via session_state (uploader widget in the main body writes this)
     try:
-        # ✅ ESPN public JSON feed (always valid)
+        uploaded = st.session_state.get("uploaded_csv", None)
+    except Exception:
+        uploaded = None
+
+    if uploaded is not None:
+        try:
+            # uploaded can be a bytes object or file-like object
+            if isinstance(uploaded, (bytes, bytearray)):
+                df = pd.read_csv(BytesIO(uploaded))
+            else:
+                df = pd.read_csv(uploaded)
+            # Normalize expected columns
+            df.columns = [c.strip() for c in df.columns]
+            # Ensure key columns exist, create if missing
+            for c in ["player_display_name", "team", "position", "week",
+                      "passing_yards", "rushing_yards", "receiving_yards"]:
+                if c not in df.columns:
+                    df[c] = None
+            df["season"] = season
+            df["position_group"] = df["position"]
+            st.success(f"✅ Loaded {len(df)} players from uploaded CSV.")
+            return df, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        except Exception as e:
+            st.error(f"Error loading uploaded CSV: {e}")
+            # fall through to try live feed
+
+    # 2) Try ESPN scoreboard -> boxscores (best-effort)
+    try:
         url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-        resp = requests.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
         events = data.get("events", [])
-        if not events:
-            raise ValueError("No live or recent games found on ESPN feed.")
-
         players = []
         for ev in events:
-            # The boxscore URL for each event
+            # find boxscore link
+            box_link = None
             for link in ev.get("links", []):
-                if link.get("rel", [""])[0] == "boxscore":
-                    box_url = link.get("href")
-                    box_resp = requests.get(box_url)
-                    if box_resp.status_code != 200:
-                        continue
-                    box = box_resp.json()
-                    for comp in box.get("boxscore", {}).get("players", []):
-                        team = comp.get("team", {}).get("abbreviation")
-                        for stat_grp in comp.get("statistics", []):
-                            for ath in stat_grp.get("athletes", []):
-                                a = ath.get("athlete", {})
-                                name = a.get("displayName")
-                                pos = a.get("position", {}).get("abbreviation")
-                                for s in ath.get("stats", []):
-                                    label = s.get("label", "")
-                                    val = s.get("value", "")
-                                    players.append({
-                                        "player_display_name": name,
-                                        "team": team,
-                                        "position": pos,
-                                        "stat_name": label,
-                                        "stat_value": val
-                                    })
-
-        stats = pd.DataFrame(players)
-        if stats.empty:
-            raise ValueError("No player stats returned from ESPN boxscores feed.")
-
-        stats["season"] = season
-        stats["week"] = data.get("week", {}).get("number", 1)
-        stats["position_group"] = stats["position"]
-
-        st.success(f"✅ Loaded {len(stats)} player stat lines from ESPN live 2025 feed.")
+                if "boxscore" in link.get("rel", []):
+                    box_link = link.get("href")
+                    break
+            if not box_link:
+                continue
+            b = requests.get(box_link, timeout=10).json()
+            for comp in b.get("boxscore", {}).get("players", []):
+                team = comp.get("team", {}).get("abbreviation")
+                for stat_grp in comp.get("statistics", []):
+                    for ath in stat_grp.get("athletes", []):
+                        a = ath.get("athlete", {})
+                        name = a.get("displayName")
+                        pos = a.get("position", {}).get("abbreviation")
+                        # stat lines: label + value (string)
+                        for s in ath.get("stats", []):
+                            label = s.get("label", "")
+                            val = s.get("value", "")
+                            # map common labels to numeric fields
+                            row = {
+                                "player_display_name": name,
+                                "team": team,
+                                "position": pos,
+                                "stat_name": label,
+                                "stat_value": val
+                            }
+                            players.append(row)
+        if players:
+            df = pd.DataFrame(players)
+            # pivot stat_name -> columns (basic attempt)
+            if "stat_name" in df.columns:
+                pivot = df.pivot_table(index=["player_display_name", "team", "position"],
+                                       columns="stat_name", values="stat_value", aggfunc='first').reset_index()
+            else:
+                pivot = df
+            # attempt to coerce common fields to numeric
+            def to_num(x):
+                try:
+                    return float(str(x).replace(",", ""))
+                except Exception:
+                    return None
+            for col in pivot.columns:
+                if col not in ["player_display_name", "team", "position"]:
+                    pivot[col] = pivot[col].apply(to_num)
+            # create standard columns if possible
+            pivot = pivot.rename(columns={
+                # common ESPN stat labels -> our names (may need adjusting)
+                "Pass Yds": "passing_yards",
+                "Rush Yds": "rushing_yards",
+                "Rec Yds": "receiving_yards"
+            })
+            pivot["season"] = season
+            pivot["week"] = data.get("week", {}).get("number", 1)
+            pivot["position_group"] = pivot.get("position")
+            st.success(f"✅ Loaded {len(pivot)} player stat lines from ESPN boxscores feed.")
+            return pivot, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     except Exception as e:
-        st.error(f"Error loading ESPN 2025 data: {e}")
-        stats = pd.DataFrame(columns=[
-            "player_display_name", "team", "position",
-            "stat_name", "stat_value", "week", "season", "position_group"
-        ])
+        # show but continue to empty fallback
+        st.warning(f"ESPN live fetch failed (this is expected sometimes): {e}")
 
-    inj = pd.DataFrame()
-    depth = pd.DataFrame()
-    sched = pd.DataFrame()
-    return stats, inj, depth, sched
-with st.spinner("Loading nflverse data..."):
-    stats_df, inj_df, depth_df, sched_df = load_all(SEASON)
-
+    # 3) Final fallback -> empty DataFrames
+    st.error("No 2025 player data found (upload CSV to continue).")
+    empty = pd.DataFrame(columns=[
+        "player_display_name", "team", "position",
+        "passing_yards", "rushing_yards", "receiving_yards",
+        "week", "season", "position_group"
+    ])
+    return empty, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 # ----------------- NORMALIZE CORE COLUMNS (no .empty calls) -----------------
 if not isinstance(stats_df, pd.DataFrame):
     stats_df = pd.DataFrame()
