@@ -17,33 +17,39 @@ SEASON = 2025
 
 @st.cache_data(show_spinner=True, ttl=60*60)
 def load_all(season: int):
-    import pandas as pd
-    import streamlit as st
+    import requests, pandas as pd, json
 
     try:
-        # nflfastR open data: weekly player stats
-        url = f"https://github.com/nflverse/nflfastR-data/blob/master/data/player_stats/player_stats_{season}.csv.gz?raw=true"
-        stats = pd.read_csv(url, compression="gzip")
+        url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams"
+        teams = requests.get(url).json()["sports"][0]["leagues"][0]["teams"]
 
-        # Normalize columns to your app’s format
-        stats.rename(columns={
-            "player_name": "player_display_name",
-            "recent_team": "team",
-            "position": "position",
-            "rushing_yards": "rushing_yards",
-            "receiving_yards": "receiving_yards",
-            "passing_yards": "passing_yards",
-            "season": "season",
-            "week": "week"
-        }, inplace=True, errors="ignore")
+        players = []
+        for t in teams:
+            team_abbr = t["team"]["abbreviation"]
+            team_id = t["team"]["id"]
 
-        # Drop duplicates & NaNs
-        stats.dropna(subset=["player_display_name"], inplace=True)
+            roster_url = f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{team_id}/roster"
+            roster = requests.get(roster_url).json()
+            for a in roster.get("athletes", []):
+                p = a["athlete"]
+                stats = a.get("stats", [{}])[0]
+                players.append({
+                    "player_display_name": p["displayName"],
+                    "team": team_abbr,
+                    "position": p.get("position", {}).get("abbreviation", ""),
+                    "season": 2025,
+                    "week": stats.get("week", "N/A"),
+                    "passing_yards": stats.get("passingYards", 0),
+                    "rushing_yards": stats.get("rushingYards", 0),
+                    "receiving_yards": stats.get("receivingYards", 0)
+                })
+
+        stats = pd.DataFrame(players)
+        st.success(f"Loaded {len(stats)} live 2025 players from ESPN feed.")
     except Exception as e:
-        st.error(f"Error loading nflfastR data: {e}")
+        st.error(f"Error loading ESPN 2025 live data: {e}")
         stats = pd.DataFrame()
 
-    # Empty placeholders to keep same structure
     inj = pd.DataFrame()
     depth = pd.DataFrame()
     sched = pd.DataFrame()
