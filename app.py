@@ -1,5 +1,5 @@
 # NFL Parlay Helper (Dual Probabilities, 2025)
-# Streamlit App – using live Sleeper API for free 2025 NFL player stats
+# Streamlit App – pulls free live player stats from Sleeper API (2025 season)
 
 import pandas as pd
 import numpy as np
@@ -7,7 +7,7 @@ import requests
 import streamlit as st
 from io import StringIO, BytesIO
 
-# Optional local utils if present
+# Optional imports (if you have utils.py)
 try:
     from utils import (
         ensure_cols, last_n_window, prob_over_normal, stat_label_and_col,
@@ -24,7 +24,7 @@ except Exception:
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA10")
+st.caption("Build: vA11")
 
 SEASON = 2025
 
@@ -60,47 +60,55 @@ def load_all():
     # 2️⃣ Sleeper API – Free Live NFL 2025 Stats
     try:
         st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
-        url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
-            st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
 
-    # 1. Fetch live stats
-    stats_url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
-    stats_resp = requests.get(stats_url, timeout=20)
-    stats_resp.raise_for_status()
-    stats_data = stats_resp.json()
+        # 1. Fetch live stats
+        stats_url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
+        stats_resp = requests.get(stats_url, timeout=20)
+        stats_resp.raise_for_status()
+        stats_data = stats_resp.json()
 
-    # 2. Fetch player directory (names, positions, teams)
-    players_url = "https://api.sleeper.app/v1/players/nfl"
-    players_resp = requests.get(players_url, timeout=20)
-    players_resp.raise_for_status()
-    players_data = players_resp.json()
+        # 2. Fetch player directory (names, positions, teams)
+        players_url = "https://api.sleeper.app/v1/players/nfl"
+        players_resp = requests.get(players_url, timeout=20)
+        players_resp.raise_for_status()
+        players_data = players_resp.json()
 
-    # 3. Convert stats and players to DataFrames
-    stats_df = pd.DataFrame(stats_data).T.reset_index(names=["player_id"])
-    players_df = pd.DataFrame(players_data).T.reset_index(names=["player_id"])
+        # 3. Convert stats and players to DataFrames
+        stats_df = pd.DataFrame(stats_data).T.reset_index(names=["player_id"])
+        players_df = pd.DataFrame(players_data).T.reset_index(names=["player_id"])
 
-    # 4. Merge on player_id to attach display names
-    merged = stats_df.merge(players_df[["player_id", "full_name", "team", "position"]],
-                            on="player_id", how="left")
+        # 4. Merge on player_id to attach display names
+        merged = stats_df.merge(
+            players_df[["player_id", "full_name", "team", "position"]],
+            on="player_id",
+            how="left"
+        )
 
-    # 5. Rename + clean columns
-    merged.rename(columns={
-        "full_name": "player_display_name",
-        "pts_ppr": "fantasy_points_ppr",
-        "pass_yd": "passing_yards",
-        "rush_yd": "rushing_yards",
-        "rec_yd": "receiving_yards"
-    }, inplace=True)
+        # 5. Rename + clean columns
+        merged.rename(columns={
+            "full_name": "player_display_name",
+            "pts_ppr": "fantasy_points_ppr",
+            "pass_yd": "passing_yards",
+            "rush_yd": "rushing_yards",
+            "rec_yd": "receiving_yards"
+        }, inplace=True)
 
-    keep = ["player_display_name", "team", "position",
-            "passing_yards", "rushing_yards", "receiving_yards", "fantasy_points_ppr"]
+        keep = [
+            "player_display_name", "team", "position",
+            "passing_yards", "rushing_yards", "receiving_yards",
+            "fantasy_points_ppr"
+        ]
 
-    for col in keep:
-        if col not in merged.columns:
-            merged[col] = np.nan
+        for col in keep:
+            if col not in merged.columns:
+                merged[col] = np.nan
 
-    st.success(f"✅ Loaded {len(merged)} live players (2025) with full names from Sleeper API.")
-    return merged[keep]
+        st.success(f"✅ Loaded {len(merged)} live players (2025) with full names from Sleeper API.")
+        return merged[keep]
+
+    except Exception as e:
+        st.error(f"Error loading Sleeper 2025 live data: {e}")
+        return pd.DataFrame()
 
 # ----------------------------
 # Load data
@@ -150,7 +158,9 @@ if st.button("Analyze"):
         st.warning("Enter a player name first.")
     else:
         # Filter for matching player
-        matches = stats_df[stats_df["player_display_name"].astype(str).str.contains(player_name, case=False, na=False)]
+        matches = stats_df[
+            stats_df["player_display_name"].astype(str).str.contains(player_name, case=False, na=False)
+        ]
 
         if matches.empty:
             st.warning("No matching player found. Try clearing filters or refining the name.")
