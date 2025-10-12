@@ -22,63 +22,70 @@ def load_all(season: int):
     import streamlit as st
 
     try:
-        # 1️⃣ Detect current week
+        # Get current week
         state = requests.get("https://api.sleeper.app/v1/state/nfl").json()
         current_week = int(state.get("week", 1))
 
-        # 2️⃣ Pull last 5 weeks of live stats
         all_weeks = list(range(max(1, current_week - 5), current_week + 1))
         frames = []
 
+        # Use Sleeper PROJECTIONS (always populated)
         for w in all_weeks:
-            url = f"https://api.sleeper.app/v1/stats/nfl/regular/{season}/{w}"
+            url = f"https://api.sleeper.app/v1/projections/nfl/{season}/{w}"
             r = requests.get(url)
             if r.status_code != 200:
                 continue
             week_data = r.json()
-            df = pd.DataFrame(week_data.values())
+            df = pd.DataFrame(week_data)
             if not df.empty:
                 df["week"] = w
                 frames.append(df)
 
         if not frames:
-            raise ValueError("No data returned from Sleeper for 2025")
+            raise ValueError("No player data returned from Sleeper projections.")
 
         stats = pd.concat(frames, ignore_index=True)
 
-        # 3️⃣ Normalize columns so your app never breaks
+        # Normalize and fill columns
         rename_map = {
-            "player_name": "player_display_name",
-            "pos": "position",
+            "player_id": "player_id",
+            "player": "player_display_name",
             "team": "team",
-            "rushing_yd": "rushing_yards",
-            "receiving_yd": "receiving_yards",
-            "passing_yd": "passing_yards",
+            "position": "position",
+            "stats.passing_yards": "passing_yards",
+            "stats.rushing_yards": "rushing_yards",
+            "stats.receiving_yards": "receiving_yards",
         }
-        stats.rename(columns=rename_map, inplace=True, errors="ignore")
 
-        # Ensure all expected columns exist
-        expected_cols = [
-            "player_display_name", "position", "team",
-            "rushing_yards", "receiving_yards", "passing_yards",
-            "week", "season"
-        ]
-        for c in expected_cols:
-            if c not in stats.columns:
-                stats[c] = None
+        # Flatten nested dicts safely
+        flat_rows = []
+        for _, row in stats.iterrows():
+            base = {
+                "player_display_name": row.get("player", {}).get("full_name", None)
+                if isinstance(row.get("player"), dict) else row.get("player", None),
+                "team": row.get("team", None),
+                "position": row.get("position", None),
+                "week": row.get("week", None),
+            }
+            s = row.get("stats", {})
+            if isinstance(s, dict):
+                base["passing_yards"] = s.get("pass_yd", 0)
+                base["rushing_yards"] = s.get("rush_yd", 0)
+                base["receiving_yards"] = s.get("rec_yd", 0)
+            flat_rows.append(base)
 
+        stats = pd.DataFrame(flat_rows)
         stats["season"] = season
-        stats["position_group"] = stats["position"]  # for your dropdown
-        stats.dropna(subset=["player_display_name"], inplace=True)
+        stats["position_group"] = stats["position"]
 
-        st.success(f"✅ Loaded {len(stats)} players for weeks {all_weeks[0]}–{all_weeks[-1]} (2025 live data).")
+        stats.dropna(subset=["player_display_name"], inplace=True)
+        st.success(f"✅ Loaded {len(stats)} live 2025 player projections for Weeks {all_weeks[0]}–{all_weeks[-1]}.")
 
     except Exception as e:
-        st.error(f"Error loading Sleeper 2025 data: {e}")
+        st.error(f"Error loading Sleeper projections: {e}")
         stats = pd.DataFrame(columns=[
-            "player_display_name", "team", "position",
-            "rushing_yards", "receiving_yards", "passing_yards",
-            "week", "season", "position_group"
+            "player_display_name", "team", "position", "rushing_yards",
+            "receiving_yards", "passing_yards", "week", "season", "position_group"
         ])
 
     inj = pd.DataFrame()
