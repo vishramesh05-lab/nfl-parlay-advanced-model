@@ -1,5 +1,5 @@
 # NFL Parlay Helper (Dual Probabilities, 2025)
-# Streamlit app using live Sleeper API for free NFL stats (per-week breakdown)
+# Streamlit app using live Sleeper API + probability model for sportsbook over/under
 
 import streamlit as st
 import pandas as pd
@@ -11,8 +11,8 @@ import requests
 # ----------------------------
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
-st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA18")
+st.caption("Live data + probability model: calculates chance of a player hitting their sportsbook line.")
+st.caption("Build: vA19")
 
 SEASON = 2025
 
@@ -23,7 +23,7 @@ st.sidebar.markdown("### Upload 2025 player CSV (optional)")
 uploaded_file = st.sidebar.file_uploader("Upload CSV with 2025 player stats", type=["csv"])
 
 # ----------------------------
-# Helper Function – Load Players
+# Helper Functions
 # ----------------------------
 @st.cache_data(show_spinner=True, ttl=60 * 30)
 def get_all_players():
@@ -38,9 +38,6 @@ def get_all_players():
     df["position"] = df["position"].fillna("")
     return df[["player_id", "full_name", "team", "position"]]
 
-# ----------------------------
-# Helper Function – Weekly Stats
-# ----------------------------
 @st.cache_data(show_spinner=True, ttl=60 * 10)
 def get_weekly_stats(week: int):
     """Fetch per-week stats for all players."""
@@ -83,11 +80,10 @@ if st.button("Analyze"):
             st.success(f"✅ Found {match.iloc[0]['full_name']} ({player_team}, {player_pos})")
 
             weekly_data = []
-            for week in range(1, current_week + 1):
+            for week in range(max(1, current_week - lookback + 1), current_week + 1):
                 stats = get_weekly_stats(week)
                 if player_id in stats:
                     pdata = stats[player_id]
-
                     if stat == "Passing Yards":
                         val = pdata.get("pass_yd", 0)
                     elif stat == "Rushing Yards":
@@ -98,7 +94,6 @@ if st.button("Analyze"):
                         val = pdata.get("pts_ppr", 0)
                     else:
                         val = 0
-
                     weekly_data.append({"week": week, stat: val})
                 else:
                     weekly_data.append({"week": week, stat: 0})
@@ -109,7 +104,30 @@ if st.button("Analyze"):
             else:
                 st.dataframe(week_df)
                 avg_val = week_df[stat].mean()
-                st.metric(label=f"Avg {stat} (Weeks 1–{current_week})", value=f"{avg_val:.2f}")
+                st.metric(label=f"Avg {stat} (Weeks {max(1, current_week - lookback + 1)}–{current_week})",
+                          value=f"{avg_val:.2f}")
+
+                # ----------------------------
+                # Probability Calculation
+                # ----------------------------
+                st.markdown("### 🎯 Probability Calculator")
+
+                over_button = st.button("📈 Over")
+                under_button = st.button("📉 Under")
+
+                if over_button or under_button:
+                    total_games = len(week_df)
+                    if total_games == 0:
+                        st.warning("No data available for probability calculation.")
+                    else:
+                        if over_button:
+                            hits = (week_df[stat] > line).sum()
+                            prob = (hits / total_games) * 100
+                            st.success(f"Probability of **Over {line} {stat.lower()}** = **{prob:.1f}%** ({hits}/{total_games} games hit)")
+                        elif under_button:
+                            hits = (week_df[stat] < line).sum()
+                            prob = (hits / total_games) * 100
+                            st.info(f"Probability of **Under {line} {stat.lower()}** = **{prob:.1f}%** ({hits}/{total_games} games hit)")
 
     except Exception as e:
         st.error(f"Error fetching data: {e}")
