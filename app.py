@@ -70,6 +70,7 @@ def load_all(season: int):
 with st.spinner("Loading nflverse data..."):
     stats_df, inj_df, depth_df, sched_df = load_all(SEASON)
 # --- Normalize/ensure a 'week' column exists -------------------------------
+stats_df.columns = [str(c) for c in stats_df.columns]  # ensure all column names are strings
 wk_col = None
 if "week" in stats_df.columns:
     wk_col = "week"
