@@ -1,5 +1,5 @@
 # NFL Parlay Helper (Dual Probabilities, 2025)
-# Streamlit App – pulls free live player stats from Sleeper API (2025 season)
+# Streamlit App – pulls live player stats from Sleeper API (2025 season)
 
 import pandas as pd
 import numpy as np
@@ -7,24 +7,13 @@ import requests
 import streamlit as st
 from io import StringIO, BytesIO
 
-# Optional imports (if you have utils.py)
-try:
-    from utils import (
-        ensure_cols, last_n_window, prob_over_normal, stat_label_and_col,
-        TEAM_LATLON, fetch_weather, injury_flag_for_player,
-        opponent_def_injuries, pace_factor, usage_trend_factor,
-        vig_to_market_prob, context_adjusted_probability, POS_FOR_STAT
-    )
-except Exception:
-    pass
-
 # ----------------------------
 # Streamlit Page Setup
 # ----------------------------
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA11")
+st.caption("Build: vA12")
 
 SEASON = 2025
 
@@ -74,17 +63,21 @@ def load_all():
         players_data = players_resp.json()
 
         # 3. Convert stats and players to DataFrames
-        stats_df = pd.DataFrame(stats_data).T.reset_index(names=["player_id"])
-        players_df = pd.DataFrame(players_data).T.reset_index(names=["player_id"])
+        stats_df = pd.DataFrame(stats_data).T
+        stats_df.reset_index(inplace=True)
+        stats_df.rename(columns={"index": "player_id"}, inplace=True)
 
-        # 4. Merge on player_id to attach display names
-        merged = stats_df.merge(
-            players_df[["player_id", "full_name", "team", "position"]],
-            on="player_id",
-            how="left"
-        )
+        players_df = pd.DataFrame(players_data).T
+        players_df.reset_index(inplace=True)
+        players_df.rename(columns={"index": "player_id"}, inplace=True)
 
-        # 5. Rename + clean columns
+        # 4. Select relevant columns from players_df (avoid duplicate player_id)
+        players_subset = players_df.loc[:, ["player_id", "full_name", "team", "position"]]
+
+        # 5. Merge safely
+        merged = pd.merge(stats_df, players_subset, on="player_id", how="left", validate="1:1")
+
+        # 6. Rename + clean columns
         merged.rename(columns={
             "full_name": "player_display_name",
             "pts_ppr": "fantasy_points_ppr",
