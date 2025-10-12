@@ -1,332 +1,164 @@
+# NFL Parlay Helper (Dual Probabilities, 2025)
+# Streamlit App – using live Sleeper API for free 2025 NFL player stats
+
 import pandas as pd
 import numpy as np
 import requests
 import streamlit as st
 from io import StringIO, BytesIO
-import pandas as pd
-import numpy as np
-import requests
-import streamlit as st
-from utils import (
-    ensure_cols, last_n_window, prob_over_normal, stat_label_and_col,
-    TEAM_LATLON, fetch_weather, injury_flag_for_player, opponent_def_injuries,
-    pace_factor, usage_trend_factor, vig_to_market_prob, context_adjusted_probability,
-    POS_FOR_STAT
-)
 
+# Optional local utils if present
+try:
+    from utils import (
+        ensure_cols, last_n_window, prob_over_normal, stat_label_and_col,
+        TEAM_LATLON, fetch_weather, injury_flag_for_player,
+        opponent_def_injuries, pace_factor, usage_trend_factor,
+        vig_to_market_prob, context_adjusted_probability, POS_FOR_STAT
+    )
+except Exception:
+    pass
+
+# ----------------------------
+# Streamlit Page Setup
+# ----------------------------
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA8")
+st.caption("Build: vA10")
 
 SEASON = 2025
-# ---------- CSV uploader (place near top of app.py) ----------
-import streamlit as st  # <— add this import here if not already imported at top
 
+# ----------------------------
+# Sidebar Upload (optional)
+# ----------------------------
 st.sidebar.markdown("### Upload 2025 player CSV (optional)")
 uploaded_file = st.sidebar.file_uploader("Upload CSV with 2025 player stats", type=["csv"])
-if uploaded_file is not None:
-    st.session_state["uploaded_csv"] = uploaded_file
-    st.sidebar.success("CSV loaded (will be used instead of live API).")
-# ------------------------------------------------------------
-@st.cache_data(show_spinner=True, ttl=60*30)
 
-def load_all(season: int):
+# ----------------------------
+# Data Loader
+# ----------------------------
+@st.cache_data(show_spinner=True, ttl=60 * 30)
+def load_all():
     """
-    Load player data. Priority:
-      1) Use user-uploaded CSV (Streamlit file_uploader).
-      2) Try ESPN scoreboard boxscore feed (best-effort).
-      3) Return empty dataframes if nothing found.
-    CSV must contain at minimum columns:
-      player_display_name, team, position, week, passing_yards, rushing_yards, receiving_yards
+    Load player data.
+    Priority:
+    1. Uploaded CSV (user-provided)
+    2. Sleeper API live data (free)
+    3. Return empty DataFrame if nothing works
     """
-    import pandas as pd
-    import requests
-    import streamlit as st
-    from io import StringIO, BytesIO
 
-    # 1) Check for uploaded file via session_state (uploader widget in the main body writes this)
-    try:
-        uploaded = st.session_state.get("uploaded_csv", None)
-    except Exception:
-        uploaded = None
-
-    if uploaded is not None:
+    # 1️⃣ Uploaded CSV
+    if uploaded_file is not None:
         try:
-            # uploaded can be a bytes object or file-like object
-            if isinstance(uploaded, (bytes, bytearray)):
-                df = pd.read_csv(BytesIO(uploaded))
-            else:
-                df = pd.read_csv(uploaded)
-            # Normalize expected columns
-            df.columns = [c.strip() for c in df.columns]
-            # Ensure key columns exist, create if missing
-            for c in ["player_display_name", "team", "position", "week",
-                      "passing_yards", "rushing_yards", "receiving_yards"]:
-                if c not in df.columns:
-                    df[c] = None
-            df["season"] = season
-            df["position_group"] = df["position"]
-            st.success(f"✅ Loaded {len(df)} players from uploaded CSV.")
-            return df, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            df = pd.read_csv(uploaded_file)
+            st.success(f"✅ Loaded {len(df)} rows from uploaded CSV")
+            return df
         except Exception as e:
-            st.error(f"Error loading uploaded CSV: {e}")
-            # fall through to try live feed
+            st.error(f"Error reading CSV: {e}")
+            return pd.DataFrame()
 
-    # 2) Try ESPN scoreboard -> boxscores (best-effort)
+    # 2️⃣ Sleeper API – Free Live NFL 2025 Stats
     try:
-        url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        events = data.get("events", [])
-        players = []
-        for ev in events:
-            # find boxscore link
-            box_link = None
-            for link in ev.get("links", []):
-                if "boxscore" in link.get("rel", []):
-                    box_link = link.get("href")
-                    break
-            if not box_link:
-                continue
-            b = requests.get(box_link, timeout=10).json()
-            for comp in b.get("boxscore", {}).get("players", []):
-                team = comp.get("team", {}).get("abbreviation")
-                for stat_grp in comp.get("statistics", []):
-                    for ath in stat_grp.get("athletes", []):
-                        a = ath.get("athlete", {})
-                        name = a.get("displayName")
-                        pos = a.get("position", {}).get("abbreviation")
-                        # stat lines: label + value (string)
-                        for s in ath.get("stats", []):
-                            label = s.get("label", "")
-                            val = s.get("value", "")
-                            # map common labels to numeric fields
-                            row = {
-                                "player_display_name": name,
-                                "team": team,
-                                "position": pos,
-                                "stat_name": label,
-                                "stat_value": val
-                            }
-                            players.append(row)
-        if players:
-            df = pd.DataFrame(players)
-            # pivot stat_name -> columns (basic attempt)
-            if "stat_name" in df.columns:
-                pivot = df.pivot_table(index=["player_display_name", "team", "position"],
-                                       columns="stat_name", values="stat_value", aggfunc='first').reset_index()
-            else:
-                pivot = df
-            # attempt to coerce common fields to numeric
-            def to_num(x):
-                try:
-                    return float(str(x).replace(",", ""))
-                except Exception:
-                    return None
-            for col in pivot.columns:
-                if col not in ["player_display_name", "team", "position"]:
-                    pivot[col] = pivot[col].apply(to_num)
-            # create standard columns if possible
-            pivot = pivot.rename(columns={
-                # common ESPN stat labels -> our names (may need adjusting)
-                "Pass Yds": "passing_yards",
-                "Rush Yds": "rushing_yards",
-                "Rec Yds": "receiving_yards"
-            })
-            pivot["season"] = season
-            pivot["week"] = data.get("week", {}).get("number", 1)
-            pivot["position_group"] = pivot.get("position")
-            st.success(f"✅ Loaded {len(pivot)} player stat lines from ESPN boxscores feed.")
-            return pivot, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
+        url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if isinstance(data, dict) and len(data) > 0:
+            # Convert dict → DataFrame
+            df = pd.DataFrame(data).T.reset_index(names=["player_id"])
+
+            # Rename key columns
+            rename_map = {
+                "pts_ppr": "fantasy_points_ppr",
+                "pass_yd": "passing_yards",
+                "rush_yd": "rushing_yards",
+                "rec_yd": "receiving_yards",
+                "team": "team",
+                "player": "player_display_name",
+                "pos": "position"
+            }
+            df.rename(columns=rename_map, inplace=True)
+
+            # Ensure necessary columns exist
+            keep = ["player_display_name", "team", "position",
+                    "passing_yards", "rushing_yards", "receiving_yards",
+                    "fantasy_points_ppr"]
+            for col in keep:
+                if col not in df.columns:
+                    df[col] = np.nan
+
+            st.success(f"✅ Loaded {len(df)} live player rows from Sleeper (2025)")
+            return df[keep]
+        else:
+            st.warning("⚠️ Sleeper API returned no data.")
+            return pd.DataFrame()
 
     except Exception as e:
-        # show but continue to empty fallback
-        st.warning(f"ESPN live fetch failed (this is expected sometimes): {e}")
+        st.error(f"Error loading Sleeper 2025 live data: {e}")
+        return pd.DataFrame()
 
-    # 3) Final fallback -> empty DataFrames
-    st.error("No 2025 player data found (upload CSV to continue).")
-    empty = pd.DataFrame(columns=[
-        "player_display_name", "team", "position",
-        "passing_yards", "rushing_yards", "receiving_yards",
-        "week", "season", "position_group"
-    ])
-    return empty, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-# ----------------- NORMALIZE CORE COLUMNS (no .empty calls) -----------------
+# ----------------------------
+# Load data
+# ----------------------------
+stats_df = load_all()
+
+# ----------------------------
+# Ensure DataFrame Structure
+# ----------------------------
 if not isinstance(stats_df, pd.DataFrame):
     stats_df = pd.DataFrame()
-if not isinstance(sched_df, pd.DataFrame):
-    sched_df = pd.DataFrame()
 
-stats_df.columns = [str(c) for c in stats_df.columns]
-sched_df.columns = [str(c) for c in sched_df.columns]
+required_cols = ["player_display_name", "team", "position",
+                 "passing_yards", "rushing_yards", "receiving_yards"]
+for col in required_cols:
+    if col not in stats_df.columns:
+        stats_df[col] = np.nan
 
-# Week column
-wk_col = None
-for c in stats_df.columns:
-    if str(c).lower() == "week":
-        wk_col = c; break
-if wk_col and wk_col != "week":
-    stats_df = stats_df.rename(columns={wk_col: "week"})
-if "week" not in stats_df.columns:
-    if all(col in sched_df.columns for col in ["game_id","week"]) and "game_id" in stats_df.columns:
-        try:
-            stats_df = stats_df.merge(sched_df[["game_id","week"]], on="game_id", how="left")
-        except Exception:
-            pass
-if "week" not in stats_df.columns:
-    stats_df["week"] = np.nan  # last resort so app won’t crash
+# ----------------------------
+# Sidebar Filters
+# ----------------------------
+st.sidebar.markdown("### Filters")
+current_week = st.sidebar.slider("Current week for matchup context", 1, 18, 6)
+lookback = st.sidebar.slider("Lookback (N weeks)", 1, 10, 5)
 
-# Team/opponent
-if "team" not in stats_df.columns:
-    if "recent_team" in stats_df.columns:
-        stats_df = stats_df.rename(columns={"recent_team":"team"})
-    elif "team_abbr" in stats_df.columns:
-        stats_df = stats_df.rename(columns={"team_abbr":"team"})
+# ----------------------------
+# Main Inputs
+# ----------------------------
+player_name = st.text_input("Player name")
+stat = st.selectbox("Stat", ["Passing Yards", "Rushing Yards", "Receiving Yards", "Fantasy Points (PPR)"])
+line = st.number_input("Sportsbook line", min_value=0.0, step=0.5)
+
+st.markdown("> Optional: enter market odds (American) to include vig")
+col1, col2 = st.columns(2)
+with col1:
+    over_odds = st.text_input("Over odds (e.g., -115 or +100)")
+with col2:
+    under_odds = st.text_input("Under odds (e.g., -105 or +100)")
+
+# ----------------------------
+# Analyze Button
+# ----------------------------
+if st.button("Analyze"):
+    if stats_df.empty:
+        st.error("No data available. Upload CSV or wait for live data.")
+    elif player_name.strip() == "":
+        st.warning("Enter a player name first.")
     else:
-        stats_df["team"] = "UNK"
-if "opponent_team" not in stats_df.columns:
-    if "opponent" in stats_df.columns:
-        stats_df["opponent_team"] = stats_df["opponent"]
-    else:
-        stats_df["opponent_team"] = np.nan
+        # Filter for matching player
+        matches = stats_df[stats_df["player_display_name"].astype(str).str.contains(player_name, case=False, na=False)]
 
-# Weeks list (safe)
-try:
-    weeks = pd.to_numeric(stats_df["week"], errors="coerce").dropna().astype(int).unique().tolist()
-    weeks = sorted(list(set(weeks)))
-except Exception:
-    weeks = []
-if not weeks:
-    weeks = list(range(1,19))  # fallback so UI renders
-wmin, wmax = int(min(weeks)), int(max(weeks))
-# ---------------------------------------------------------------------------
-
-st.sidebar.header("Filters")
-week_for_matchup = st.sidebar.slider("Current week for matchup context", min_value=wmin, max_value=wmax, value=wmax, step=1)
-n_weeks = st.sidebar.slider("Lookback (N weeks)", min_value=3, max_value=8, value=4, step=1)
-team_opt = ["(All)"] + sorted([t for t in stats_df["team"].dropna().unique() if isinstance(t,str)])
-pos_opt  = ["(All)"] + sorted(stats_df["position_group"].dropna().unique().tolist())
-team_sel = st.sidebar.selectbox("Team (optional)", options=team_opt)
-pos_sel  = st.sidebar.selectbox("Position group (optional)", options=pos_opt)
-
-search = st.text_input("Player name")
-col_stat, col_line = st.columns([2,1])
-with col_stat:
-    stat_name = st.selectbox("Stat", options=list(stat_label_and_col.__globals__["STAT_MAP"].keys()), index=1)
-with col_line:
-    line_value = st.number_input("Sportsbook line", min_value=0.0, value=60.5, step=0.5)
-
-with st.expander("Optional: enter market odds (American) to include vig"):
-    c1, c2 = st.columns(2)
-    over_odds = c1.text_input("Over odds (e.g., -115 or +100)", value="")
-    under_odds = c2.text_input("Under odds (e.g., -105 or +100)", value="")
-
-go = st.button("Analyze")
-st.divider()
-
-# Filters
-filtered = stats_df.copy()
-if team_sel != "(All)":
-    filtered = filtered[filtered["team"]==team_sel]
-if pos_sel != "(All)":
-    filtered = filtered[filtered["position_group"]==pos_sel]
-
-def find_best_candidate(df, name):
-    if not name: return None
-    cands = df[df["player_display_name"].str.contains(name, case=False, na=False)]
-    if cands.empty: return None
-    return cands.sort_values("week").tail(1).iloc[0]
-
-if not go:
-    st.info("Enter a player, stat, line → Analyze.")
-else:
-    cand = find_best_candidate(filtered, search)
-    if cand is None:
-        st.warning("No matching player found. Try clearing filters or refine the name.")
-    else:
-        player = cand["player_display_name"]; team = cand["team"]
-        stat_label, stat_col = stat_label_and_col(stat_name)
-        if stat_col not in stats_df.columns:
-            st.error("Selected stat not available in dataset."); st.stop()
-
-        st.subheader(f"{player} ({team}, {cand.get('position','')}) — {stat_label} vs Line {line_value}")
-        hist = last_n_window(stats_df, player, n_weeks, week_max=week_for_matchup)
-        show_cols = [c for c in ["season","week","team","opponent_team",stat_col] if c in hist.columns]
-        if hist.empty:
-            st.warning("Not enough recent games for historical estimate.")
+        if matches.empty:
+            st.warning("No matching player found. Try clearing filters or refining the name.")
         else:
-            # Section 1: Historical
-            p_hist, params = prob_over_normal(hist[stat_col].astype(float), float(line_value))
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Last-N Avg", f"{hist[stat_col].mean():.1f}")
-            c2.metric("Std Dev (min-reg.)", f"{params['sigma']:.1f}")
-            c3.metric("Prob OVER (Historical)", f"{p_hist*100:.1f} %")
-            st.markdown("**Recent games (last N)**")
-            st.dataframe(hist[show_cols], use_container_width=True, height=220)
+            st.success(f"✅ Found {len(matches)} records for {player_name}")
+            st.dataframe(matches.head(10))
 
-            # Context inputs
-            # Opponent for selected week (use schedules if present)
-            opp_team = None; game_date = ""
-            if not sched_df.empty and "season" in sched_df.columns and "week" in sched_df.columns:
-                s = sched_df[(sched_df.get("season", SEASON)==SEASON) &
-                             (sched_df["week"]==week_for_matchup) &
-                             ((sched_df.get("home_team")==team) | (sched_df.get("away_team")==team))]
-                if not s.empty:
-                    r = s.iloc[0]
-                    opp_team = r["away_team"] if r["home_team"]==team else r["home_team"]
-                    game_date = str(r.get("game_date",""))
-
-            # Weather via stadium coords
-            weather = {}
-            if team in TEAM_LATLON:
-                lat, lon = TEAM_LATLON[team]
-                iso_time = (game_date + "T16:00") if game_date else pd.Timestamp.now().strftime("%Y-%m-%dT16:00")
-                weather = fetch_weather(lat, lon, iso_time)
-
-            player_inj = injury_flag_for_player(inj_df, player)
-            def_inj = opponent_def_injuries(inj_df, opp_team) if opp_team else {}
-            pace_mult = pace_factor(stats_df, team, opp_team) if opp_team else 1.0
-            usage_mult = usage_trend_factor(hist, stat_col)
-
-            def parse_odds(s):
-                s = s.strip()
-                if not s: return None
-                try: return float(s)
-                except: return None
-            market_prob = None
-            o_odds = parse_odds(over_odds); u_odds = parse_odds(under_odds)
-            if o_odds is not None and u_odds is not None:
-                market_prob = vig_to_market_prob(o_odds, u_odds)
-
-            # Section 2: Context-Adjusted
-            p_final, details = context_adjusted_probability(
-                hist_samples=hist[stat_col].astype(float),
-                line_value=float(line_value),
-                stat_label=stat_label,
-                player_injury_flag=player_inj,
-                weather_dict=weather,
-                opp_def_inj=def_inj,
-                pace_mult=pace_mult,
-                usage_mult=usage_mult,
-                market_prob_over=market_prob
-            )
-            d1, d2, d3 = st.columns(3)
-            d1.metric("Prob OVER (Adjusted)", f"{details['p_final']*100:.1f} %")
-            d2.metric("Adj. Mean (μ')", f"{details['mu_adjusted']:.1f}")
-            d3.metric("Market Over (de-vig)", f"{(details['p_market_over']*100 if not np.isnan(details['p_market_over']) else 0):.1f} %")
-
-            with st.expander("Explain adjustments"):
-                st.markdown(f"""
-**Player injury:** `{player_inj}` → **{details['m_injury']:.2f}**  
-**Weather:** → **{details['m_weather']:.2f}**  
-**Opponent defensive injuries:** {def_inj if def_inj else "{}"} → **{details['m_opp_def']:.2f}**  
-**Pace proxy:** **{details['m_pace']:.2f}**  
-**Usage trend:** **{details['m_usage']:.2f}**  
-**μ, σ:** {details['mu_hist']:.1f}, {details['sigma_hist']:.1f} → μ' **{details['mu_adjusted']:.1f}**  
-**Model Adj Prob:** {details['p_model_adj']*100:.1f}%  
-**Market (de-vig) Over:** {("" if np.isnan(details['p_market_over']) else f"{details['p_market_over']*100:.1f}%")}  
-**Final (blend 65% model / 35% market):** {details['p_final']*100:.1f}%
-""")
-            st.caption("Heuristics only. Not betting advice. Weather via Open-Meteo; injuries/schedules via nflverse at runtime.")
+            # Display basic stat summary
+            selected_stat = stat.lower().replace(" ", "_").replace("(ppr)", "fantasy_points_ppr")
+            if selected_stat in matches.columns:
+                avg_value = matches[selected_stat].astype(float).mean()
+                st.metric(label=f"Avg {stat} (last {lookback} weeks)", value=f"{avg_value:.2f}")
+            else:
+                st.warning("Stat not found for selected player.")
