@@ -131,7 +131,17 @@ if stats_df is None or stats_df.empty:
     st.error("Player-week stats are not available right now. Try again later or check your season/week settings.")
     st.stop()
 
-weeks = sorted(stats_df["week"].dropna().unique().tolist())
+# Build weeks list safely
+try:
+    weeks = pd.to_numeric(stats_df["week"], errors="coerce").dropna().astype(int).unique().tolist()
+    weeks = sorted(list(set(weeks)))
+except Exception:
+    weeks = []
+
+if not weeks:
+    st.error("Couldn’t determine available weeks from the data. Try again later.")
+    st.stop()
+
 wmin, wmax = int(min(weeks)), int(max(weeks))
 
 st.sidebar.header("Filters")
