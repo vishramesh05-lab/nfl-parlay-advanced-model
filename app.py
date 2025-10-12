@@ -13,7 +13,7 @@ from io import StringIO, BytesIO
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA14")
+st.caption("Build: vA15")
 
 SEASON = 2025
 
@@ -22,6 +22,21 @@ SEASON = 2025
 # ----------------------------
 st.sidebar.markdown("### Upload 2025 player CSV (optional)")
 uploaded_file = st.sidebar.file_uploader("Upload CSV with 2025 player stats", type=["csv"])
+
+# ----------------------------
+# Helper Function – Deduplicate Columns
+# ----------------------------
+def make_unique_columns(columns):
+    seen = {}
+    result = []
+    for col in columns:
+        if col not in seen:
+            seen[col] = 0
+            result.append(col)
+        else:
+            seen[col] += 1
+            result.append(f"{col}_{seen[col]}")
+    return result
 
 # ----------------------------
 # Data Loader
@@ -56,14 +71,13 @@ def load_all():
         stats_resp.raise_for_status()
         stats_data = stats_resp.json()
 
-        # Convert stats JSON to DataFrame and flatten
         stats_df = pd.DataFrame(stats_data).T.reset_index()
         stats_df.rename(columns={"index": "player_id"}, inplace=True)
 
-        # Drop duplicate columns
-        stats_df = stats_df.loc[:, ~stats_df.columns.duplicated()].copy()
+        # Deduplicate column names safely
+        stats_df.columns = make_unique_columns(stats_df.columns)
 
-        # If there are multiple rows per player_id, keep only first
+        # Drop duplicate player_ids
         stats_df = stats_df.drop_duplicates(subset=["player_id"], keep="first")
 
         # Fetch player metadata
@@ -74,12 +88,11 @@ def load_all():
 
         players_df = pd.DataFrame(players_data).T.reset_index()
         players_df.rename(columns={"index": "player_id"}, inplace=True)
+        players_df.columns = make_unique_columns(players_df.columns)
 
-        # Drop duplicate columns in players_df too
-        players_df = players_df.loc[:, ~players_df.columns.duplicated()].copy()
-
-        # Select only relevant columns
-        players_subset = players_df[["player_id", "full_name", "team", "position"]].drop_duplicates(subset=["player_id"])
+        # Select relevant columns only
+        players_subset = players_df.loc[:, ["player_id", "full_name", "team", "position"]]
+        players_subset = players_subset.drop_duplicates(subset=["player_id"])
 
         # Merge safely
         merged = pd.merge(stats_df, players_subset, on="player_id", how="left")
@@ -93,7 +106,7 @@ def load_all():
             "rec_yd": "receiving_yards"
         }, inplace=True)
 
-        # Ensure expected columns
+        # Ensure expected columns exist
         keep = [
             "player_display_name", "team", "position",
             "passing_yards", "rushing_yards", "receiving_yards",
@@ -103,10 +116,7 @@ def load_all():
             if col not in merged.columns:
                 merged[col] = np.nan
 
-        # Final cleanup of non-unique column names
-        merged.columns = pd.io.parsers.ParserBase({'names': merged.columns})._maybe_dedup_names(merged.columns)
-
-        st.success(f"✅ Loaded {len(merged)} unique live players (2025) with full names from Sleeper API.")
+        st.success(f"✅ Loaded {len(merged)} unique live players (2025) from Sleeper API.")
         return merged[keep]
 
     except Exception as e:
