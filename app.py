@@ -12,7 +12,7 @@ import requests
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Live data + probability model: calculates chance of a player hitting their sportsbook line.")
-st.caption("Build: vA19")
+st.caption("Build: vA20")
 
 SEASON = 2025
 
@@ -68,22 +68,25 @@ if st.button("Analyze"):
         st.info("🔍 Fetching player info and weekly stats...")
         players_df = get_all_players()
 
-        # Match player by name
+        # Match player safely
         match = players_df[players_df["full_name"].str.contains(player_name, case=False, na=False)]
         if match.empty:
             st.warning("No matching player found. Try refining the name.")
         else:
-            player_id = match.iloc[0]["player_id"]
-            player_team = match.iloc[0]["team"]
-            player_pos = match.iloc[0]["position"]
+            # Select first match safely
+            player_id = str(match.iloc[0]["player_id"])
+            player_team = str(match.iloc[0]["team"])
+            player_pos = str(match.iloc[0]["position"])
+            player_full = str(match.iloc[0]["full_name"])
 
-            st.success(f"✅ Found {match.iloc[0]['full_name']} ({player_team}, {player_pos})")
+            st.success(f"✅ Found {player_full} ({player_team}, {player_pos})")
 
             weekly_data = []
             for week in range(max(1, current_week - lookback + 1), current_week + 1):
                 stats = get_weekly_stats(week)
-                if player_id in stats:
-                    pdata = stats[player_id]
+                pdata = stats.get(player_id, {})
+
+                if pdata:
                     if stat == "Passing Yards":
                         val = pdata.get("pass_yd", 0)
                     elif stat == "Rushing Yards":
@@ -94,13 +97,16 @@ if st.button("Analyze"):
                         val = pdata.get("pts_ppr", 0)
                     else:
                         val = 0
-                    weekly_data.append({"week": week, stat: val})
                 else:
-                    weekly_data.append({"week": week, stat: 0})
+                    val = 0
 
+                weekly_data.append({"week": week, stat: val})
+
+            # Convert to DataFrame
             week_df = pd.DataFrame(weekly_data)
+
             if week_df.empty:
-                st.warning(f"No weekly {stat} data found for {player_name} yet.")
+                st.warning(f"No weekly {stat} data found for {player_full} yet.")
             else:
                 st.dataframe(week_df)
                 avg_val = week_df[stat].mean()
@@ -112,22 +118,24 @@ if st.button("Analyze"):
                 # ----------------------------
                 st.markdown("### 🎯 Probability Calculator")
 
-                over_button = st.button("📈 Over")
-                under_button = st.button("📉 Under")
+                colA, colB = st.columns(2)
+                with colA:
+                    over_button = st.button("📈 Over")
+                with colB:
+                    under_button = st.button("📉 Under")
 
-                if over_button or under_button:
-                    total_games = len(week_df)
-                    if total_games == 0:
-                        st.warning("No data available for probability calculation.")
-                    else:
-                        if over_button:
-                            hits = (week_df[stat] > line).sum()
-                            prob = (hits / total_games) * 100
-                            st.success(f"Probability of **Over {line} {stat.lower()}** = **{prob:.1f}%** ({hits}/{total_games} games hit)")
-                        elif under_button:
-                            hits = (week_df[stat] < line).sum()
-                            prob = (hits / total_games) * 100
-                            st.info(f"Probability of **Under {line} {stat.lower()}** = **{prob:.1f}%** ({hits}/{total_games} games hit)")
+                total_games = len(week_df)
+                if total_games == 0:
+                    st.warning("No data available for probability calculation.")
+                else:
+                    if over_button:
+                        hits = (week_df[stat] > line).sum()
+                        prob = (hits / total_games) * 100
+                        st.success(f"📈 Probability of **Over {line} {stat.lower()}** = **{prob:.1f}%** ({hits}/{total_games} games hit)")
+                    elif under_button:
+                        hits = (week_df[stat] < line).sum()
+                        prob = (hits / total_games) * 100
+                        st.info(f"📉 Probability of **Under {line} {stat.lower()}** = **{prob:.1f}%** ({hits}/{total_games} games hit)")
 
     except Exception as e:
         st.error(f"Error fetching data: {e}")
