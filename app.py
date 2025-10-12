@@ -1,11 +1,10 @@
 # NFL Parlay Helper (Dual Probabilities, 2025)
-# Streamlit app using live Sleeper API for free NFL stats
+# Streamlit app using live Sleeper API for free NFL stats (per-week breakdown)
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from io import StringIO, BytesIO
 
 # ----------------------------
 # Streamlit Page Setup
@@ -13,7 +12,7 @@ from io import StringIO, BytesIO
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)", layout="wide")
 st.title("🏈 NFL Parlay Helper (Dual Probabilities, 2025)")
 st.caption("Two estimates: (1) Historical from last N games, and (2) Context-Adjusted including injuries, weather, pace, usage trend, opponent defensive injuries, and market vig.")
-st.caption("Build: vA17")
+st.caption("Build: vA18")
 
 SEASON = 2025
 
@@ -24,92 +23,31 @@ st.sidebar.markdown("### Upload 2025 player CSV (optional)")
 uploaded_file = st.sidebar.file_uploader("Upload CSV with 2025 player stats", type=["csv"])
 
 # ----------------------------
-# Helper Function – Deduplicate Columns
-# ----------------------------
-def make_unique_columns(columns):
-    seen = {}
-    result = []
-    for col in columns:
-        if col not in seen:
-            seen[col] = 0
-            result.append(col)
-        else:
-            seen[col] += 1
-            result.append(f"{col}_{seen[col]}")
-    return result
-
-# ----------------------------
-# Data Loader
+# Helper Function – Load Players
 # ----------------------------
 @st.cache_data(show_spinner=True, ttl=60 * 30)
-def load_all():
-    """Load player data from uploaded CSV or Sleeper API."""
-    # 1️⃣ Uploaded CSV
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.success(f"✅ Loaded {len(df)} rows from uploaded CSV")
-            return df
-        except Exception as e:
-            st.error(f"Error reading CSV: {e}")
-            return pd.DataFrame()
-
-    # 2️⃣ Sleeper API – Free Live NFL 2025 Stats
-    try:
-        st.info("🔄 Fetching live 2025 player stats from Sleeper (free API)...")
-
-        stats_url = "https://api.sleeper.app/v1/stats/nfl/regular/2025"
-        stats_resp = requests.get(stats_url, timeout=20)
-        stats_resp.raise_for_status()
-        stats_data = stats_resp.json()
-
-        stats_df = pd.DataFrame(stats_data).T.reset_index()
-        stats_df.rename(columns={"index": "player_id"}, inplace=True)
-        stats_df.columns = make_unique_columns(stats_df.columns)
-        stats_df = stats_df.drop_duplicates(subset=["player_id"], keep="first")
-
-        players_url = "https://api.sleeper.app/v1/players/nfl"
-        players_resp = requests.get(players_url, timeout=20)
-        players_resp.raise_for_status()
-        players_data = players_resp.json()
-
-        players_df = pd.DataFrame(players_data).T.reset_index()
-        players_df.rename(columns={"index": "player_id"}, inplace=True)
-        players_df.columns = make_unique_columns(players_df.columns)
-
-        players_subset = players_df.loc[:, ["player_id", "full_name", "team", "position"]]
-        players_subset = players_subset.drop_duplicates(subset=["player_id"])
-
-        merged = pd.merge(stats_df, players_subset, on="player_id", how="left")
-
-        merged.rename(columns={
-            "full_name": "player_display_name",
-            "pts_ppr": "fantasy_points_ppr",
-            "pass_yd": "passing_yards",
-            "rush_yd": "rushing_yards",
-            "rec_yd": "receiving_yards"
-        }, inplace=True)
-
-        keep = [
-            "player_display_name", "team", "position",
-            "passing_yards", "rushing_yards", "receiving_yards",
-            "fantasy_points_ppr"
-        ]
-        for col in keep:
-            if col not in merged.columns:
-                merged[col] = np.nan
-
-        st.success(f"✅ Loaded {len(merged)} unique live players (2025) from Sleeper API.")
-        return merged[keep]
-
-    except Exception as e:
-        st.error(f"Error loading Sleeper 2025 live data: {e}")
-        return pd.DataFrame()
+def get_all_players():
+    """Fetch full player dictionary from Sleeper (includes names + IDs)."""
+    url = "https://api.sleeper.app/v1/players/nfl"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    df = pd.DataFrame(data).T.reset_index().rename(columns={"index": "player_id"})
+    df["full_name"] = df["full_name"].fillna("")
+    df["team"] = df["team"].fillna("")
+    df["position"] = df["position"].fillna("")
+    return df[["player_id", "full_name", "team", "position"]]
 
 # ----------------------------
-# Load Season Data
+# Helper Function – Weekly Stats
 # ----------------------------
-stats_df = load_all()
+@st.cache_data(show_spinner=True, ttl=60 * 10)
+def get_weekly_stats(week: int):
+    """Fetch per-week stats for all players."""
+    url = f"https://api.sleeper.app/v1/stats/nfl/regular/{week}"
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    return resp.json()
 
 # ----------------------------
 # Sidebar Filters
@@ -125,75 +63,53 @@ player_name = st.text_input("Player name")
 stat = st.selectbox("Stat", ["Passing Yards", "Rushing Yards", "Receiving Yards", "Fantasy Points (PPR)"])
 line = st.number_input("Sportsbook line", min_value=0.0, step=0.5)
 
-st.markdown("> Optional: enter market odds (American) to include vig")
-col1, col2 = st.columns(2)
-with col1:
-    over_odds = st.text_input("Over odds (e.g., -115 or +100)")
-with col2:
-    under_odds = st.text_input("Under odds (e.g., -105 or +100)")
-
 # ----------------------------
-# Analyze Button (Per-Week Breakdown)
+# Analyze
 # ----------------------------
 if st.button("Analyze"):
-    if stats_df.empty:
-        st.error("No data available. Upload CSV or wait for live data.")
-    elif player_name.strip() == "":
-        st.warning("Enter a player name first.")
-    else:
-        matches = stats_df[
-            stats_df["player_display_name"].astype(str).str.contains(player_name, case=False, na=False)
-        ]
+    try:
+        st.info("🔍 Fetching player info and weekly stats...")
+        players_df = get_all_players()
 
-        if matches.empty:
+        # Match player by name
+        match = players_df[players_df["full_name"].str.contains(player_name, case=False, na=False)]
+        if match.empty:
             st.warning("No matching player found. Try refining the name.")
         else:
-            st.success(f"✅ Found {len(matches)} record(s) for {player_name}")
+            player_id = match.iloc[0]["player_id"]
+            player_team = match.iloc[0]["team"]
+            player_pos = match.iloc[0]["position"]
 
-            # --- Fetch weekly stats directly from Sleeper API ---
-            try:
-                weekly_rows = []
-                for week_num in range(1, current_week + 1):
-                    url = f"https://api.sleeper.app/v1/stats/nfl/regular/{week_num}"
-                    resp = requests.get(url, timeout=20)
-                    resp.raise_for_status()
-                    data = resp.json()
+            st.success(f"✅ Found {match.iloc[0]['full_name']} ({player_team}, {player_pos})")
 
-                    for pid, pdata in data.items():
-                        # Extract player name and stat dynamically
-                        player_id = str(pid)
-                        player_stats = pdata if isinstance(pdata, dict) else {}
-                        if not player_stats:
-                            continue
+            weekly_data = []
+            for week in range(1, current_week + 1):
+                stats = get_weekly_stats(week)
+                if player_id in stats:
+                    pdata = stats[player_id]
 
-                        # Match on name (from metadata if available)
-                        name_key = player_stats.get("player", "")
-                        if player_name.lower() in str(name_key).lower():
-                            # Select correct stat key
-                            if stat == "Passing Yards":
-                                key = "pass_yd"
-                            elif stat == "Rushing Yards":
-                                key = "rush_yd"
-                            elif stat == "Receiving Yards":
-                                key = "rec_yd"
-                            elif stat == "Fantasy Points (PPR)":
-                                key = "pts_ppr"
-                            else:
-                                key = None
+                    if stat == "Passing Yards":
+                        val = pdata.get("pass_yd", 0)
+                    elif stat == "Rushing Yards":
+                        val = pdata.get("rush_yd", 0)
+                    elif stat == "Receiving Yards":
+                        val = pdata.get("rec_yd", 0)
+                    elif stat == "Fantasy Points (PPR)":
+                        val = pdata.get("pts_ppr", 0)
+                    else:
+                        val = 0
 
-                            if key and key in player_stats:
-                                weekly_rows.append({
-                                    "week": week_num,
-                                    stat: player_stats.get(key, 0)
-                                })
-
-                if weekly_rows:
-                    week_df = pd.DataFrame(weekly_rows).sort_values("week")
-                    st.dataframe(week_df)
-                    avg_value = week_df[stat].astype(float).mean()
-                    st.metric(label=f"Avg {stat} (Weeks 1–{current_week})", value=f"{avg_value:.2f}")
+                    weekly_data.append({"week": week, stat: val})
                 else:
-                    st.warning(f"No weekly {stat} data found for {player_name} yet.")
+                    weekly_data.append({"week": week, stat: 0})
 
-            except Exception as e:
-                st.error(f"Error fetching weekly data: {e}")
+            week_df = pd.DataFrame(weekly_data)
+            if week_df.empty:
+                st.warning(f"No weekly {stat} data found for {player_name} yet.")
+            else:
+                st.dataframe(week_df)
+                avg_val = week_df[stat].mean()
+                st.metric(label=f"Avg {stat} (Weeks 1–{current_week})", value=f"{avg_val:.2f}")
+
+    except Exception as e:
+        st.error(f"Error fetching data: {e}")
