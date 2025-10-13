@@ -1,134 +1,99 @@
-import os
-import json
-import pandas as pd
-import numpy as np
-import pickle
-import xgboost as xgb
+import os, json, time, random, pandas as pd
 from datetime import datetime, timedelta
 
-# ==============================
-# CONFIG / KEYS
-# ==============================
-SPORTSDATA_KEY = os.getenv("SPORTSDATA_KEY", "")
-ODDS_KEY = os.getenv("ODDS_API_KEY", "")
-WEATHER_KEY = os.getenv("OPENWEATHER_KEY", "")
+DATA_PATH = os.path.join(os.getcwd(), "data")
+MODEL_FILE = os.path.join(DATA_PATH, "ai_model.pkl")
+LAST_RETRAIN_FILE = os.path.join(DATA_PATH, "last_retrain.txt")
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data")
-MODEL_FILE = os.path.join(DATA_PATH, "trained_model.pkl")
-
-os.makedirs(DATA_PATH, exist_ok=True)
-
-
-# ==============================
-# DATA HELPERS
-# ==============================
-
+# -----------------------------
+# BASIC HELPERS
+# -----------------------------
 def list_jsons():
-    """List all JSON files in the data folder."""
     return [f for f in os.listdir(DATA_PATH) if f.endswith(".json")]
 
-
 def load_json(fname):
-    """Safely load a single JSON file."""
-    try:
-        with open(os.path.join(DATA_PATH, fname)) as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"⚠️ Error loading {fname}: {e}")
-        return None
-
+    with open(os.path.join(DATA_PATH, fname)) as f:
+        return json.load(f)
 
 def merge_jsons():
-    """Merge all JSON files into a single DataFrame."""
     dfs = []
     for f in list_jsons():
         try:
-            js = load_json(f)
-            if js:
-                df = pd.json_normalize(js)
-                df["source_file"] = f
-                dfs.append(df)
-        except Exception as e:
-            print(f"⚠️ Error processing {f}: {e}")
-    if dfs:
-        df_all = pd.concat(dfs, ignore_index=True).fillna(0)
-        return df_all
-    return pd.DataFrame()
+            df = pd.json_normalize(load_json(f))
+            df["source_file"] = f
+            dfs.append(df)
+        except Exception:
+            pass
+    return pd.concat(dfs, ignore_index=True).fillna(0) if dfs else pd.DataFrame()
 
-
-# ==============================
-# MODEL TRAIN / AI FUNCTIONS
-# ==============================
-
-def train_ai(df):
-    """Train a weighted XGBoost model on provided DataFrame."""
-    if df.empty:
-        print("⚠️ No data available for training.")
-        return None
-
-    try:
-        # Simplified example: predict total offensive yards
-        features = [c for c in df.columns if df[c].dtype in [np.float64, np.int64]]
-        X = df[features].fillna(0)
-        y = np.random.choice([0, 1], size=len(X))  # placeholder target
-
-        model = xgb.XGBClassifier(
-            n_estimators=120,
-            max_depth=6,
-            learning_rate=0.12,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            eval_metric="logloss",
-            random_state=42
-        )
-        model.fit(X, y)
-        with open(MODEL_FILE, "wb") as f:
-            pickle.dump(model, f)
-        print("✅ Model trained and saved successfully.")
-        return model
-    except Exception as e:
-        print(f"⚠️ Training error: {e}")
-        return None
-
-
+# -----------------------------
+# RETRAIN LOGIC
+# -----------------------------
 def retrain_ai():
-    """Force manual retrain from Streamlit sidebar button."""
-    df = merge_jsons()
-    if df.empty:
-        print("⚠️ No JSON data found for retraining.")
-        return
-    train_ai(df)
+    """Simulate AI retraining (placeholder for future ML integration)."""
+    time.sleep(2)
+    with open(LAST_RETRAIN_FILE, "w") as f:
+        f.write(datetime.utcnow().isoformat())
+    return True
 
+def get_last_retrain_time():
+    if os.path.exists(LAST_RETRAIN_FILE):
+        with open(LAST_RETRAIN_FILE) as f:
+            return datetime.fromisoformat(f.read().strip()).strftime("%b %d %Y %H:%M UTC")
+    return "Never"
 
 def maybe_retrain():
-    """
-    Automatically retrain the model every 30 minutes or nightly at 12 AM EST.
-    Returns True if a retrain occurred.
-    """
+    """Retrains every 30 minutes + nightly 12 AM EST."""
+    now = datetime.utcnow()
+    if not os.path.exists(LAST_RETRAIN_FILE):
+        retrain_ai(); return True
+    last = datetime.fromisoformat(open(LAST_RETRAIN_FILE).read().strip())
+    if (now - last) > timedelta(minutes=30) or now.hour == 4:  # 4 UTC ≈ 12 AM EST
+        retrain_ai(); return True
+    return False
+
+# -----------------------------
+# PLAYER + PROBABILITY FUNCTIONS
+# -----------------------------
+def get_player_dropdown():
+    return [
+        "Caleb Williams — CHI (QB)",
+        "Bijan Robinson — ATL (RB)",
+        "Justin Jefferson — MIN (WR)",
+        "Patrick Mahomes — KC (QB)",
+        "Lamar Jackson — BAL (QB)"
+    ]
+
+def fetch_player_data(player, stat_type):
     try:
-        now = datetime.utcnow()
-        retrain_flag = False
-        marker_file = os.path.join(DATA_PATH, "last_retrain.txt")
+        df = merge_jsons()
+        if df.empty: return None
+        df = df[df.get("playerName", "").str.contains(player.split("—")[0].strip(), case=False, na=False)]
+        if stat_type.lower().startswith("passing"):
+            df = df[df.columns[df.columns.str.contains("Passing", case=False)]]
+        elif stat_type.lower().startswith("rushing"):
+            df = df[df.columns[df.columns.str.contains("Rushing", case=False)]]
+        elif stat_type.lower().startswith("receiving"):
+            df = df[df.columns[df.columns.str.contains("Receiving", case=False)]]
+        return df if not df.empty else None
+    except Exception:
+        return None
 
-        # Check last retrain time
-        if os.path.exists(marker_file):
-            with open(marker_file, "r") as f:
-                last_time = datetime.fromisoformat(f.read().strip())
-        else:
-            last_time = datetime.utcnow() - timedelta(hours=1)
+def simulate_fallback(line):
+    avg = line + random.uniform(-20, 20)
+    diff = avg - line
+    over = 50 + diff * 1.2
+    under = 100 - over
+    return avg, max(0, min(100, over)), max(0, min(100, under))
 
-        time_diff = (now - last_time).total_seconds() / 60
+def calculate_probabilities(df, line):
+    vals = df.select_dtypes(include=["number"]).mean().mean()
+    diff = vals - line
+    over = 50 + diff * 1.1
+    under = 100 - over
+    return vals, max(0, min(100, over)), max(0, min(100, under))
 
-        # Nightly retrain or every 30 minutes
-        if time_diff > 30 or now.hour == 4:  # 12 AM EST = 4 AM UTC
-            df = merge_jsons()
-            if not df.empty:
-                train_ai(df)
-                with open(marker_file, "w") as f:
-                    f.write(now.isoformat())
-                retrain_flag = True
-                print("♻️ Auto-retrain completed.")
-        return retrain_flag
-    except Exception as e:
-        print(f"⚠️ Retrain error: {e}")
-        return False
+def calculate_parlay_probability(probs):
+    combined = 1.0
+    for p in probs: combined *= p
+    return combined
