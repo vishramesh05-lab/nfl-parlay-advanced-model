@@ -1,162 +1,274 @@
 # -*- coding: utf-8 -*-
-# NFL Parleggy AI Model vFinal+AutoSync
-# Author: Vish (Project Nova Analytics)
-# Description: Live-updating AI-driven NFL probability model with visualization + confidence metrics
+"""
+NFL Parleggy AI Model — Final
+Author: Vish (Project Nova Analytics)
 
-import streamlit as st
-import pandas as pd
+This app:
+- Loads live JSON data from /data
+- Trains a local XGBoost model nightly @ 12 AM EST (and on demand)
+- Auto-refreshes data every 30 minutes
+- Computes over/under probabilities per player/market using learned mean + residual sigma
+- Provides a Parlay Probability tab with a light correlation penalty
+"""
+
+import os, json, time, datetime, traceback
 import numpy as np
+import pandas as pd
+import streamlit as st
 import plotly.express as px
-import os, json, time, datetime
-import utils  # our AI + retrain helper
 
-# ----------------------- PAGE CONFIG -----------------------
-st.set_page_config(
-    page_title="NFL Parleggy AI Model",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+import utils  # local AI + data helpers
 
-# ----------------------- STYLE -----------------------------
+# ----------------------------- PAGE CONFIG & STYLE -----------------------------
+st.set_page_config(page_title="NFL Parleggy AI Model", layout="wide", initial_sidebar_state="expanded")
+
 st.markdown("""
 <style>
-body {background-color:#0e1117;color:#e8e8e8;font-family:'Inter',sans-serif;}
-h1,h2,h3{color:#00b4ff;font-weight:700;}
-.sidebar .sidebar-content{background-color:#111827;}
-.stButton>button{
-  background-color:#00b4ff;color:white;border-radius:8px;border:none;
-  font-weight:600;padding:0.5rem 1.2rem;
-}
-.stButton>button:hover{background-color:#008fd1;}
+:root { --bg:#0e1117; --card:#161a22; --text:#e8e8e8; --muted:#A0AEC0; --blue:#00b4ff; }
+body { background-color: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; }
+h1,h2,h3 { color: var(--blue); font-weight: 700; letter-spacing: .2px; }
+.stTabs [data-baseweb="tab-list"] { gap: 16px; }
+.stTabs [data-baseweb="tab"] { color: #bbb; padding: 8px 16px; border: none; }
+.stTabs [data-baseweb="tab"][aria-selected="true"] { color: var(--blue); border-bottom: 2px solid var(--blue); }
+.card { background: var(--card); border-radius: 12px; padding: 16px; box-shadow: 0 4px 10px rgba(0,0,0,.25); }
+.metric { font-size: 28px; font-weight: 800; }
+hr { border-color:#222; }
 </style>
 """, unsafe_allow_html=True)
 
-# ----------------------- HEADER ----------------------------
-st.title("🏈 NFL Parleggy AI Model")
-st.caption("AI-driven model updating every 30 minutes • Full retrain nightly @ 12 AM EST")
+st.title("NFL Parleggy AI Model")
+st.caption("Live JSON ➜ Feature Engine ➜ XGBoost ➜ Probability • Auto-refresh every 30 min • Nightly retrain 12:00 AM EST")
 
-# ----------------------- AUTO REFRESH ----------------------
-REFRESH_INTERVAL = 30 * 60  # 30 minutes
-current_time = time.time()
-last_refresh = st.session_state.get("last_refresh", 0)
-if current_time - last_refresh > REFRESH_INTERVAL:
-    st.session_state.last_refresh = current_time
-    st.rerun()
+# ----------------------------- AUTO REFRESH / NIGHTLY RETRAIN -----------------
+# Auto-refresh UI every 30 minutes to pick up new /data files
+st_autoref = st.runtime.legacy_caching.hashing._CodeHasher  # silence IDE warnings
+st_autorefresh = st.experimental_rerun  # alias for clarity (we will use rerun only when needed)
 
-# Nightly retrain at 12 AM EST
-if datetime.datetime.now().strftime("%H:%M") == "00:00":
-    try:
-        utils.retrain_model()  # placeholder for actual retrain
-        st.toast("🤖 Nightly retrain complete!")
-    except Exception as e:
-        st.warning(f"Retrain skipped: {e}")
+REFRESH_SEC = 30 * 60
+now_ts = time.time()
+last = st.session_state.get("last_refresh_ts", 0.0)
+if now_ts - last > REFRESH_SEC:
+    st.session_state["last_refresh_ts"] = now_ts
+    # Do not force rerun here; we will rely on cache TTL and on-demand retrain.
 
-# ----------------------- LOAD JSON DATA --------------------
-DATA_PATH = os.path.join(os.getcwd(), "data")
-data_files = [f for f in os.listdir(DATA_PATH) if f.endswith(".json")]
-
-if not data_files:
-    st.error("⚠️ No data found in /data folder. Upload valid JSON files.")
-    st.stop()
-
-frames = []
-for file in data_files:
-    path = os.path.join(DATA_PATH, file)
-    try:
-        with open(path, "r") as f:
-            js = json.load(f)
-        if isinstance(js, list):
-            df = pd.json_normalize(js)
-        elif isinstance(js, dict):
-            df = pd.DataFrame([js])
-        else:
-            continue
-        df["source_file"] = file
-        frames.append(df)
-    except Exception as e:
-        st.warning(f"Skipped {file}: {e}")
-
-if not frames:
-    st.error("No readable player data found.")
-    st.stop()
-
-data = pd.concat(frames, ignore_index=True).fillna(0)
-
-# ----------------------- PLAYER DROPDOWN -------------------
-name_col = None
-for possible in ["Name", "player", "PlayerName", "Player", "full_name"]:
-    if possible in data.columns:
-        name_col = possible
-        break
-
-if name_col is None:
-    st.error("⚠️ Could not detect player name column. Check JSON keys.")
-    st.stop()
-
-player = st.selectbox("Select Player", sorted(map(str, data[name_col].dropna().unique())))
-st.markdown("---")
-
-# ----------------------- AI PANEL --------------------------
-st.subheader("🤖 AI Probability & Confidence Dashboard")
-
+# Nightly retrain trigger (12:00 AM EST = 04:00 UTC)
 try:
-    # Placeholder AI logic (swap later with utils predictions)
-    np.random.seed(int(time.time()) % 10000)
-    over_prob = np.random.uniform(0.55, 0.95)
-    under_prob = 1 - over_prob
-    confidence_score = abs(over_prob - 0.5) * 200
-    accuracy_index = np.random.uniform(75, 99)
+    utils.maybe_retrain_all()  # safe; returns quickly if not due
+except Exception:
+    pass
 
-    # Metrics
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Over Probability", f"{over_prob*100:.1f}%", "AI Model")
-    col2.metric("Under Probability", f"{under_prob*100:.1f}%", "AI Model")
-    col3.metric("Confidence Score", f"{confidence_score:.1f}%", "Signal Strength")
+# ----------------------------- SIDEBAR: CONTROLS & STATUS ---------------------
+with st.sidebar:
+    st.header("Controls")
+    if st.button("🔄 Retrain Now (All Markets)", use_container_width=True):
+        with st.spinner("Retraining models..."):
+            msg = utils.retrain_all_models()
+        st.success(msg)
 
-    # Confidence color
-    if confidence_score > 80:
-        color = "#21ba45"; status = "High Confidence"
-    elif confidence_score > 60:
-        color = "#fbbd08"; status = "Moderate Confidence"
-    else:
-        color = "#db2828"; status = "Low Confidence"
+    st.write(f"**Last Retrain:** {utils.get_last_retrain_time()}")
+    st.caption("Auto: every 30 min (data cache) • Full retrain nightly @ 12:00 AM EST")
 
-    # Confidence Panel
-    st.markdown(
-        f"""
-        <div style='padding:1.5rem;border-radius:10px;background-color:{color};
-                    text-align:center;font-size:18px;font-weight:600;color:white;'>
-            {status} — Model Accuracy: {accuracy_index:.1f}%
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    # Training log chart (if available)
+    try:
+        log = utils.get_training_log()
+        if not log.empty:
+            st.subheader("📈 Model MAE over time")
+            fig = px.line(
+                log, x="timestamp", y="mae", color="market",
+                markers=True, labels={"mae":"Mean Abs Error", "timestamp":"UTC Timestamp", "market":"Market"},
+                title=None
+            )
+            fig.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font=dict(color="#e8e8e8"), height=260)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("No training log yet — will appear after first retrain.")
+    except Exception:
+        st.caption("Training log unavailable.")
 
-    # Visualization
-    fig = px.bar(
-        x=["Over", "Under"],
-        y=[over_prob * 100, under_prob * 100],
-        color=["Over", "Under"],
-        color_discrete_sequence=["#21ba45", "#db2828"],
-        title=f"Predicted Outcome Probabilities for {player}",
-        labels={"x": "Outcome", "y": "Probability (%)"}
-    )
-    fig.update_layout(
-        title_x=0.5,
-        plot_bgcolor="#0e1117",
-        paper_bgcolor="#0e1117",
-        font=dict(color="white"),
-        showlegend=False
-    )
-    st.plotly_chart(fig, use_container_width=True)
+# ----------------------------- LOAD DATA (CACHED) -----------------------------
+@st.cache_data(ttl=REFRESH_SEC)
+def load_all_jsons():
+    return utils.load_merged_json()
 
-except Exception as e:
-    st.error(f"⚠️ AI computation failed: {e}")
+df_all = load_all_jsons()
+if df_all is None or df_all.empty:
+    st.error("No readable JSON data found in /data. Add files like 3.json, 4.json, 5.json, 6.json.")
+    st.stop()
 
-# ----------------------- FOOTER ----------------------------
+# Detect columns robustly
+name_col = utils.detect_name_column(df_all)
+pos_col = utils.detect_position_column(df_all)
+week_col = utils.detect_week_column(df_all)
+team_col = utils.detect_team_column(df_all)
+opp_col = utils.detect_opp_column(df_all)
+
+# ----------------------------- APP TABS ---------------------------------------
+tab_player, tab_parlay = st.tabs(["Player Probability Model", "Parlay Probability Model"])
+
+# ============================= PLAYER TAB =====================================
+with tab_player:
+    st.subheader("Individual Player Projection & Probability")
+
+    # Filter to skill positions if possible
+    df_players = df_all.copy()
+    if pos_col:
+        skill_mask = df_players[pos_col].astype(str).str.upper().isin(["QB", "RB", "WR", "TE"])
+        if skill_mask.any():
+            df_players = df_players[skill_mask]
+
+    # Build dropdown
+    player_list = sorted(set(map(str, df_players[name_col].dropna().unique()))) if name_col else []
+    if not player_list:
+        st.error("Could not detect player names in data. Check JSON structure.")
+        st.stop()
+
+    colA, colB, colC = st.columns([2, 1.2, 1.2])
+    with colA:
+        player = st.selectbox("Player", player_list)
+    with colB:
+        market = st.selectbox(
+            "Pick Type / Market",
+            ["Passing Yards", "Rushing Yards", "Receiving Yards", "Rushing+Receiving TDs", "Passing TDs"]
+        )
+    with colC:
+        line = st.number_input("Sportsbook Line", min_value=0.0, step=0.5, value=250.0)
+
+    colD, colE = st.columns([1.2, 1])
+    with colD:
+        opponent = st.text_input("Opponent (e.g., KC, BUF, PHI)", value="")
+    with colE:
+        lookback = st.slider("Lookback (weeks)", min_value=1, max_value=8, value=4, step=1)
+
+    run = st.button("Analyze Player", type="primary")
+
+    if run:
+        with st.spinner(f"Computing {market} probabilities for {player}…"):
+            try:
+                # Prepare player slice (recent weeks)
+                hist = utils.get_player_history(
+                    df_all, player_name=player, name_col=name_col, week_col=week_col, lookback_weeks=lookback
+                )
+
+                # Train (if model missing) & Predict for this market
+                pred = utils.predict_player_market(
+                    df_all=df_all,
+                    player_name=player,
+                    market=market,
+                    line=line,
+                    opponent=opponent,
+                    name_col=name_col,
+                    week_col=week_col,
+                    team_col=team_col,
+                    opp_col=opp_col,
+                    lookback_weeks=lookback
+                )
+
+                # --- UI Output ---
+                top1, top2, top3 = st.columns(3)
+                top1.metric("Predicted Mean", f"{pred['pred_mean']:.1f}")
+                top2.metric("Over Probability", f"{pred['p_over']*100:.1f}%")
+                top3.metric("Under Probability", f"{pred['p_under']*100:.1f}%")
+
+                # Confidence banner
+                color, label = utils.confidence_color_label(pred["confidence"])
+                st.markdown(
+                    f"<div class='card' style='text-align:center;border-left:6px solid {color};'>"
+                    f"<div class='metric' style='color:{color};'>{label}</div>"
+                    f"<div style='color:#cfd8e3'>Confidence Score: {pred['confidence']:.1f}% • "
+                    f"Model MAE: {pred['mae']:.2f} • Samples: {pred['samples']}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+                # Table of recent weeks
+                st.markdown("### Recent Weeks (table)")
+                if hist is None or hist.empty:
+                    st.info("No recent-week table available for this player.")
+                else:
+                    st.dataframe(hist, use_container_width=True, hide_index=True)
+
+                # Small bar chart (optional, kept elegant)
+                st.markdown("### Market Distribution Preview")
+                fig = px.histogram(
+                    pred["dist_samples"], x="value", nbins=20,
+                    title=f"{player} — simulated distribution vs line ({line})",
+                )
+                fig.add_vline(x=line, line_color="red")
+                fig.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font=dict(color="#e8e8e8"))
+                st.plotly_chart(fig, use_container_width=True)
+
+            except Exception as e:
+                st.error("Analysis failed:")
+                st.code(traceback.format_exc())
+
+# ============================= PARLAY TAB =====================================
+with tab_parlay:
+    st.subheader("Multi-Leg Parlay Probability")
+
+    num_legs = st.number_input("Number of legs", min_value=2, max_value=10, value=3, step=1)
+    legs = []
+
+    for i in range(int(num_legs)):
+        st.markdown(f"#### Leg {i+1}")
+        c1, c2, c3, c4 = st.columns([2, 1.6, 1.2, 1.2])
+        with c1:
+            pl = st.selectbox(f"Player (Leg {i+1})", player_list, key=f"pl_{i}")
+        with c2:
+            mk = st.selectbox(
+                f"Market (Leg {i+1})",
+                ["Passing Yards", "Rushing Yards", "Receiving Yards", "Rushing+Receiving TDs", "Passing TDs"],
+                key=f"mk_{i}"
+            )
+        with c3:
+            ln = st.number_input(f"Line (Leg {i+1})", min_value=0.0, step=0.5, value=50.0, key=f"ln_{i}")
+        with c4:
+            opp = st.text_input(f"Opponent (Leg {i+1})", value="", key=f"opp_{i}")
+
+        legs.append(dict(player=pl, market=mk, line=ln, opp=opp))
+
+    if st.button("Compute Parlay Probability", type="primary"):
+        with st.spinner("Computing parlay…"):
+            try:
+                # Compute per-leg probability via the same model
+                results = []
+                for lg in legs:
+                    res = utils.predict_player_market(
+                        df_all=df_all,
+                        player_name=lg["player"],
+                        market=lg["market"],
+                        line=lg["line"],
+                        opponent=lg["opp"],
+                        name_col=name_col,
+                        week_col=week_col,
+                        team_col=team_col,
+                        opp_col=opp_col,
+                        lookback_weeks=4
+                    )
+                    results.append(res)
+
+                # Combine with light correlation penalty
+                p, penalty = utils.combine_parlay_probabilities(results)
+                st.success(f"Parlay Hit Probability: {p*100:.2f}% (correlation adj: −{penalty*100:.1f}%)")
+
+                # Show leg table
+                out = pd.DataFrame([{
+                    "Player": legs[i]["player"],
+                    "Market": legs[i]["market"],
+                    "Line": legs[i]["line"],
+                    "Opponent": legs[i]["opp"],
+                    "Over %": f"{results[i]['p_over']*100:.1f}",
+                    "Conf %": f"{results[i]['confidence']:.1f}"
+                } for i in range(len(legs))])
+                st.dataframe(out, use_container_width=True, hide_index=True)
+
+            except Exception as e:
+                st.error("Parlay computation failed:")
+                st.code(traceback.format_exc())
+
+# ----------------------------- FOOTER -----------------------------------------
+st.markdown("<hr/>", unsafe_allow_html=True)
 st.markdown(
-    f"<hr><p style='text-align:center;font-size:14px;color:#999;'>"
-    f"Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S EST')} • Auto-refreshes every 30 minutes • "
-    f"Powered by Project Nova Analytics</p>",
+    "<div style='text-align:center;color:#A0AEC0;'>© 2025 Project Nova Analytics • Local AI engine • "
+    "Data auto-refresh 30 min • Nightly retrain at 12:00 AM EST</div>",
     unsafe_allow_html=True
 )
