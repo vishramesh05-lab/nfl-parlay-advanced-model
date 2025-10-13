@@ -1,5 +1,5 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA28
-# Live Sleeper + ESPN Defense + Weather integration
+# NFL Parlay Helper (Dual Probabilities, 2025) — vA30
+# Free ESPN API + OpenWeather integration
 # Author: Vish (2025)
 
 import streamlit as st
@@ -10,19 +10,15 @@ import re
 from difflib import get_close_matches
 
 # -------------------------------------------------------------------------
-# Page Config
-st.set_page_config(
-    page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
-    layout="wide",
-    page_icon="🏈"
-)
+st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
+                   layout="wide", page_icon="🏈")
 
 st.markdown(
     "<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
     unsafe_allow_html=True
 )
-st.caption("Live data + probability model — Sleeper API (2025) + ESPN Defense + OpenWeather")
-st.caption("Build vA28 | by Vish")
+st.caption("Live data + probability model — ESPN + OpenWeather (Free Data Source)")
+st.caption("Build vA30 | by Vish")
 
 # -------------------------------------------------------------------------
 # Sidebar Filters
@@ -39,116 +35,59 @@ opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)", "")
 weather_city = st.text_input("Weather City (optional, e.g., Detroit)", "")
 
 # -------------------------------------------------------------------------
-# API Endpoints
-SLEEPER_BASE = "https://api.sleeper.app/v1/stats/nfl"
-SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
-OPENWEATHER_KEY = "demo"   # replace with your real OpenWeather key
+# ESPN + OpenWeather URLs
+ESPN_SEARCH_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes"
+ESPN_PLAYER_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes/{pid}/statistics"
+OPENWEATHER_KEY = "demo"  # replace with real key if desired
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
-ESPN_DEFENSE_URL = "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/teams"
 
 # -------------------------------------------------------------------------
-# Utility Functions
-
-def _norm(s: str) -> str:
-    """Normalize names (remove punctuation, lowercase)."""
-    return re.sub(r"[^a-z]", "", (s or "").lower())
+def _norm(s): return re.sub(r"[^a-z]", "", (s or "").lower())
 
 @st.cache_data(ttl=3600)
-def load_sleeper_players():
-    """Loads all Sleeper NFL players once and caches."""
-    r = requests.get(SLEEPER_PLAYERS_URL, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-def get_player_info(name: str):
-    """Find player_id from Sleeper master list."""
-    data = load_sleeper_players()
+def search_player_espm(name):
+    """Search player by name via ESPN free JSON index."""
     q = _norm(name)
-    matches = []
-    for pid, p in data.items():
-        full = _norm(p.get("full_name") or "")
-        disp = _norm(p.get("display_name") or "")
-        last = _norm(p.get("last_name") or "")
-        if q in full or q in disp or q in last:
-            matches.append({
-                "id": pid,
-                "name": p.get("full_name"),
-                "team": p.get("team"),
-                "pos": p.get("position")
-            })
-    if matches:
-        return matches[0]
-
+    resp = requests.get(ESPN_SEARCH_URL, timeout=20)
+    if resp.status_code != 200:
+        return None
+    data = resp.json().get("items", [])
+    for p in data:
+        nm = _norm(p.get("displayName", ""))
+        if q in nm:
+            return p
     # fuzzy fallback
-    names = [p.get("full_name", "") for p in data.values() if p.get("full_name")]
+    names = [p.get("displayName", "") for p in data]
     best = get_close_matches(name, names, n=1, cutoff=0.75)
     if best:
-        for pid, p in data.items():
-            if p.get("full_name") == best[0]:
-                return {"id": pid, "name": p.get("full_name"), "team": p.get("team"), "pos": p.get("position")}
+        for p in data:
+            if p.get("displayName") == best[0]:
+                return p
     return None
 
-@st.cache_data(ttl=1200)
-def fetch_sleeper_week(year: int, week: int):
-    """
-    Fetch weekly stats with automatic season_type fallback.
-    Sleeper returns {} if data for that type/week doesn’t exist.
-    """
-    urls = [
-        f"{SLEEPER_BASE}/regular/{year}/{week}?season_type=regular",
-        f"{SLEEPER_BASE}/post/{year}/{week}?season_type=post",
-        f"{SLEEPER_BASE}/pre/{year}/{week}?season_type=pre"
-    ]
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=20)
-            if debug_mode:
-                st.write("Fetching:", url, "| Status:", r.status_code)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, dict):
-                    data = list(data.values())
-                if isinstance(data, list) and len(data) > 0:
-                    return data
-        except Exception as e:
-            if debug_mode:
-                st.write("Fetch error:", e)
-            continue
-    return []
-
-def find_player_weekly(name: str, year: int, weeks: list[int]) -> pd.DataFrame:
-    """Retrieve player stats by resolved player_id."""
-    player = get_player_info(name)
-    if not player:
-        st.warning("Could not match player name in Sleeper catalog.")
-        return pd.DataFrame()
-    pid = player["id"]
-    records = []
-
-    for wk in weeks:
-        week_data = fetch_sleeper_week(year, wk)
-        if not week_data:
-            continue
-        for row in week_data:
-            if row.get("player_id") == pid:
-                records.append({
-                    "week": wk,
-                    "passing_yards": float(row.get("pass_yd", 0) or 0),
-                    "rushing_yards": float(row.get("rush_yd", 0) or 0),
-                    "receiving_yards": float(row.get("rec_yd", 0) or 0),
-                    "opp": row.get("opponent") or row.get("opp") or ""
-                })
-                break
-
-    df = pd.DataFrame(records)
-    if debug_mode:
-        st.write("Fetched weeks:", [r["week"] for r in records])
-        if not df.empty:
-            st.dataframe(df.head())
-    return df
+def fetch_player_stats(pid):
+    """Pull player stat history from ESPN (includes 2025)."""
+    url = ESPN_PLAYER_URL.format(pid=pid)
+    r = requests.get(url, timeout=25)
+    if r.status_code != 200:
+        return None
+    j = r.json()
+    splits = j.get("splits", [])
+    weekly = []
+    for s in splits:
+        if "statSource" in s and "week" in s:
+            wk = s.get("week")
+            stats = s.get("stats", {})
+            weekly.append({
+                "week": wk,
+                "passing_yards": float(stats.get("passingYards", 0)),
+                "rushing_yards": float(stats.get("rushingYards", 0)),
+                "receiving_yards": float(stats.get("receivingYards", 0))
+            })
+    return pd.DataFrame(weekly)
 
 def fetch_weather(city):
-    """Get weather for specified city."""
+    """Fetch weather from OpenWeather."""
     city = (city or "").strip()
     if not city:
         return None, None
@@ -161,87 +100,69 @@ def fetch_weather(city):
         pass
     return None, None
 
-def fetch_defense_rank(team_abbr):
-    """Placeholder: ESPN team data (optional extension)."""
-    try:
-        r = requests.get(ESPN_DEFENSE_URL, timeout=20)
-        if r.status_code != 200:
-            return None
-        js = r.json()
-        teams = js.get("sports", [])[0].get("leagues", [])[0].get("teams", [])
-        team_abbr = (team_abbr or "").upper().strip()
-        for t in teams:
-            team = t.get("team", {})
-            if team.get("abbreviation", "").upper() == team_abbr:
-                return None
-    except Exception:
-        pass
-    return None
-
 def calc_prob(series, line, direction):
-    """Calculate percentage chance of over/under hitting."""
-    if len(series) == 0:
-        return 0.0
+    if len(series) == 0: return 0.0
     hits = (series > line).sum() if direction == "Over" else (series < line).sum()
     return round(100 * hits / len(series), 1)
 
 # -------------------------------------------------------------------------
-# Main Analysis
 if st.button("Analyze Player", use_container_width=True):
     if not player_name or sportsbook_line <= 0:
         st.warning("Enter a valid player name and sportsbook line.")
     else:
-        st.info("Fetching live data from Sleeper API …")
-        weeks = list(range(max(1, current_week - lookback_weeks + 1), current_week + 1))
-        df = find_player_weekly(player_name, 2025, weeks)
+        st.info("Fetching data from ESPN API …")
 
-        if df.empty:
-            st.error(f"No stats found for '{player_name}'. Try verifying name or season/week availability.")
-        else:
-            stat_map = {
-                "Passing Yards": "passing_yards",
-                "Rushing Yards": "rushing_yards",
-                "Receiving Yards": "receiving_yards"
-            }
-            stat_col = stat_map[stat_type]
-            view = df[["week", stat_col]].rename(columns={stat_col: "value"})
+        # Search player on ESPN
+        player = search_player_espm(player_name)
+        if not player:
+            st.error(f"No player found for '{player_name}'. Try full name.")
+            st.stop()
 
-            # ----- Visualization -----
-            fig = px.bar(
-                view, x="week", y="value", text="value",
-                title=f"{player_name} — {stat_type} (Last {lookback_weeks} Weeks)"
-            )
-            fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
-            st.plotly_chart(fig, use_container_width=True)
+        pid = player.get("id") or player.get("uid", "").split(":")[-1]
+        df = fetch_player_stats(pid)
 
-            # ----- Base Probability -----
-            st.subheader("🎯 Baseline Probability")
-            col1, col2 = st.columns(2)
-            if col1.button("Over"):
-                st.success(f"Over Probability: {calc_prob(view['value'], sportsbook_line, 'Over')}%")
-            if col2.button("Under"):
-                st.warning(f"Under Probability: {calc_prob(view['value'], sportsbook_line, 'Under')}%")
+        if df is None or df.empty:
+            st.error(f"No stats available for '{player_name}' (ESPN data may be limited).")
+            st.stop()
 
-            # ----- Context Adjustments -----
-            st.divider()
-            st.subheader("📊 Context-Adjusted Probability")
-            weather, temp = fetch_weather(weather_city)
-            defense_rank = fetch_defense_rank(opponent_team)
+        stat_map = {
+            "Passing Yards": "passing_yards",
+            "Rushing Yards": "rushing_yards",
+            "Receiving Yards": "receiving_yards"
+        }
+        stat_col = stat_map[stat_type]
+        df = df[df["week"].notna()].sort_values("week")
 
-            base = calc_prob(view["value"], sportsbook_line, "Over")
-            adj = base
-            if defense_rank is not None:
-                adj -= min(10, max(0, (32 - float(defense_rank)) / 3))
-            if weather and "rain" in weather.lower():
-                adj -= 8
-            if temp is not None and temp < 40:
-                adj -= 5
-            adj = max(0, min(100, adj))
+        # --------------- Visualization ---------------
+        fig = px.bar(df, x="week", y=stat_col, text=stat_col,
+                     title=f"{player_name} — {stat_type} (2025 Season)")
+        fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
+        st.plotly_chart(fig, use_container_width=True)
 
-            st.info(f"Opponent: {opponent_team or 'N/A'} | Defense Rank: {defense_rank or 'N/A'} | "
-                    f"Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
-            st.success(f"Adjusted Over Probability: {adj}%")
+        # --------------- Probability ---------------
+        st.subheader("🎯 Baseline Probability")
+        col1, col2 = st.columns(2)
+        if col1.button("Over"):
+            st.success(f"Over Probability: {calc_prob(df[stat_col], sportsbook_line, 'Over')}%")
+        if col2.button("Under"):
+            st.warning(f"Under Probability: {calc_prob(df[stat_col], sportsbook_line, 'Under')}%")
+
+        # --------------- Context Adjustments ---------------
+        st.divider()
+        st.subheader("📊 Context-Adjusted Probability")
+
+        weather, temp = fetch_weather(weather_city)
+        base = calc_prob(df[stat_col], sportsbook_line, "Over")
+        adj = base
+        if weather and "rain" in weather.lower():
+            adj -= 8
+        if temp and temp < 40:
+            adj -= 5
+        adj = max(0, min(100, adj))
+
+        st.info(f"Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
+        st.success(f"Adjusted Over Probability: {adj}%")
 
 # -------------------------------------------------------------------------
 st.markdown("---")
-st.caption("Data: Sleeper API • ESPN • OpenWeather • Build vA28 (2025)")
+st.caption("Data: ESPN API (Free) • OpenWeather • Build vA30 (2025)")
