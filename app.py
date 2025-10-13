@@ -18,7 +18,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import utils  # local helper module
-
+import os
+# ...
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 # ============ PAGE CONFIG ============
 st.set_page_config(
     page_title="NFL Parleggy AI Model",
