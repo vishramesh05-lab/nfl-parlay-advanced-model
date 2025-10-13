@@ -4,5 +4,3 @@ numpy
 plotly
 requests
 chardet
-pyarrow
-openpyxl
