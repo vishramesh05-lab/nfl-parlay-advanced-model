@@ -24,6 +24,18 @@ import utils  # <- all the stat detection, JSON merging, probability math
 
 # ---------------------- Page / Style ----------------------
 st.set_page_config(
+    # --- Auto refresh every 30 minutes (Streamlit 1.37 safe) ---
+try:
+    st.cache_data.clear()
+    st.cache_resource.clear()
+except Exception:
+    pass
+
+# Soft page reload every 30 minutes to pick up fresh cached data
+st.markdown(
+    "<script>setTimeout(() => { window.location.reload(); }, 1800000);</script>",
+    unsafe_allow_html=True,
+)
     page_title="NFL Parleggy AI Model",
     layout="wide",
     initial_sidebar_state="expanded"
