@@ -1,309 +1,260 @@
 # -*- coding: utf-8 -*-
-# Utilities for NFL Parleggy AI Model
-import os, json, glob, math
-from datetime import datetime, timezone, timedelta
+"""
+Utility helpers for NFL Parleggy Model:
+- JSON loading/merging
+- Column detection & standardization
+- Market series mapping
+- Simple AI projection + probability math
+"""
+
+import os, json, math, time
+from datetime import datetime, timezone
+from glob import glob
+from typing import List, Tuple, Optional
+
 import numpy as np
 import pandas as pd
-from dateutil import tz
-from scipy.stats import norm, poisson
 
-# ---------- Paths ----------
-HERE = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = os.path.join(HERE, "data")
-RETRAIN_STAMP = "/tmp/parleggy_last_retrain.txt"
+# ---- Canonical Markets exposed in UI ----
+MARKET_OPTIONS = [
+    "Passing Yards",
+    "Rushing Yards",
+    "Receiving Yards",
+    "Receptions",
+    "Passing TDs",
+    "Rushing TDs",
+    "Receiving TDs",
+    "Rushing+Receiving TDs",
+]
 
-# ---------- Retrain stamp ----------
-def touch_retrain_stamp() -> None:
+# ---- file bookkeeping for tiny UI badges ----
+_LAST_CHECK = os.path.join("data", "_last_refresh_utc.txt")
+_MAE_FILE   = os.path.join("data", "_model_mae.csv")
+
+def touch_last_checked():
     try:
-        with open(RETRAIN_STAMP, "w") as f:
+        with open(_LAST_CHECK, "w") as f:
             f.write(datetime.now(timezone.utc).isoformat())
     except Exception:
         pass
 
-def get_last_retrain_time() -> str | None:
-    try:
-        if not os.path.exists(RETRAIN_STAMP):
-            return None
-        ts = open(RETRAIN_STAMP).read().strip()
-        dt = datetime.fromisoformat(ts.replace("Z","+00:00"))
-        return dt.strftime("%b %d %Y %H:%M UTC")
-    except Exception:
-        return None
+def last_checked() -> str:
+    if os.path.exists(_LAST_CHECK):
+        try:
+            with open(_LAST_CHECK, "r") as f:
+                return f.read().strip()
+        except Exception:
+            return "unknown"
+    return "never"
 
-def _today_12am_est_utc() -> datetime:
-    # 12:00 AM EST today in UTC (EST = UTC-5; we ignore DST here for simplicity)
-    now_utc = datetime.now(timezone.utc)
-    today = now_utc.date()
-    # 05:00 UTC corresponds roughly to 00:00 EST (standard time)
-    return datetime(today.year, today.month, today.day, 5, 0, 0, tzinfo=timezone.utc)
+def load_mae_history() -> pd.DataFrame:
+    if os.path.exists(_MAE_FILE):
+        try:
+            df = pd.read_csv(_MAE_FILE)
+            df["ts"] = pd.to_datetime(df["ts"])
+            return df.tail(30)
+        except Exception:
+            return pd.DataFrame(columns=["ts", "mae"])
+    return pd.DataFrame(columns=["ts", "mae"])
 
-def maybe_mark_nightly_retrain():
+def log_mae(value: float):
     try:
-        target = _today_12am_est_utc()
-        last = None
-        if os.path.exists(RETRAIN_STAMP):
-            last = datetime.fromisoformat(open(RETRAIN_STAMP).read().strip().replace("Z","+00:00"))
-        if (not last) or (last < target):
-            touch_retrain_stamp()
+        df = load_mae_history()
+        df = pd.concat([df, pd.DataFrame({"ts":[datetime.now(timezone.utc)], "mae":[float(value)]})], ignore_index=True)
+        df.to_csv(_MAE_FILE, index=False)
     except Exception:
         pass
 
-# ---------- JSON Ingestion ----------
-def _read_json_any(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def _to_df_from_obj(obj) -> pd.DataFrame:
-    # Accept list-of-dicts or dict-with-list inside, or flat dict
-    if isinstance(obj, list):
-        return pd.json_normalize(obj)
-    if isinstance(obj, dict):
-        # If any list value, take the first list-like
-        for k, v in obj.items():
-            if isinstance(v, list):
-                return pd.json_normalize(v)
-        return pd.json_normalize(obj)
-    return pd.DataFrame()
-
-def load_all_jsons() -> pd.DataFrame:
-    files = sorted(glob.glob(os.path.join(DATA_PATH, "*.json")))
+# ---- JSON I/O ----
+def load_all_jsons(path: str) -> pd.DataFrame:
     frames = []
-    for fp in files:
+    for fp in glob(os.path.join(path, "*.json")):
         try:
-            js = _read_json_any(fp)
-            df = _to_df_from_obj(js)
-            if not df.empty:
-                df["_source_file"] = os.path.basename(fp)
-                frames.append(df)
+            with open(fp, "r") as f:
+                js = json.load(f)
+            frames.append(pd.json_normalize(js))
         except Exception:
-            # skip bad files but keep going
+            # tolerate a single bad file
             continue
-    if frames:
-        out = pd.concat(frames, ignore_index=True).fillna(0)
-        # unify column names to a canonical set (lower for detection)
-        out.columns = [str(c) for c in out.columns]
-        return out
-    return pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True).fillna(0)
+    return out
 
-# ---------- Column detection ----------
-def _detect_one(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    cols = [c for c in df.columns]
-    # exact first
-    for c in candidates:
-        if c in cols: return c
-    # lower match
-    lc = {c.lower(): c for c in cols}
-    for c in candidates:
-        if c.lower() in lc: return lc[c.lower()]
-    # contains match
-    for c in cols:
-        for k in candidates:
-            if k.lower() in c.lower():
-                return c
+# ---- column detection helpers (very forgiving) ----
+def _first_match(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cols = [c.lower() for c in df.columns]
+    for cand in candidates:
+        if cand in df.columns:
+            return cand
+        # case-insensitive
+        if cand.lower() in cols:
+            return df.columns[cols.index(cand.lower())]
+    # substring fallback
+    for c in df.columns:
+        lc = c.lower()
+        if any(key in lc for key in candidates):
+            return c
     return None
 
-def detect_name_column(df) -> str | None:
-    # common player name fields
-    return _detect_one(df, ["Name", "Player", "FullName", "PlayerName"])
+def detect_name_column(df: pd.DataFrame) -> str:
+    c = _first_match(df, ["Name","Player","PlayerName","FullName"])
+    return c or df.columns[0]
 
-def detect_pos_column(df) -> str | None:
-    return _detect_one(df, ["Position", "Pos", "PlayerPosition"])
+def detect_week_column(df: pd.DataFrame) -> str:
+    c = _first_match(df, ["Week","GameWeek","weeknumber","Game.Week"])
+    return c or df.columns[0]
 
-def detect_team_column(df) -> str | None:
-    return _detect_one(df, ["Team", "TeamAbbr", "GlobalTeamID", "HomeTeam", "TeamID"])
+def detect_opponent_column(df: pd.DataFrame) -> str:
+    c = _first_match(df, ["Opponent","OpponentTeam","OppTeam","Opp","vs","OppAbbr"])
+    return c or df.columns[0]
 
-def detect_opp_column(df) -> str | None:
-    return _detect_one(df, ["Opponent", "OpponentAbbr", "GlobalOpponentID", "AwayTeam", "OpponentID"])
+def detect_team_column(df: pd.DataFrame) -> Optional[str]:
+    return _first_match(df, ["Team","TeamAbbr","TeamCode","TeamID","TeamId"])
 
-def detect_week_column(df) -> str | None:
-    return _detect_one(df, ["Week", "WeekNumber", "GameWeek"])
+# ---- standardize names we’ll look for later ----
+_CANON_MAP = {
+    # yards
+    "Passing Yards": ["PassingYards","PassYds","PassYards","pass_yd","passyards","pass_yards"],
+    "Rushing Yards": ["RushingYards","RushYds","RushYards","rush_yd","rushingyards","rush_yards"],
+    "Receiving Yards": ["ReceivingYards","RecYds","RecYards","recv_yd","receivingyards","rec_yards"],
+    # receptions
+    "Receptions": ["Receptions","Rec","Catches","receptions","recs","targets_caught"],
+    # TDs
+    "Passing TDs": ["PassingTouchdowns","PassTD","PassTDs","pass_tds","pass_td"],
+    "Rushing TDs": ["RushingTouchdowns","RushTD","RushTDs","rush_tds","rush_td"],
+    "Receiving TDs": ["ReceivingTouchdowns","RecTD","RecTDs","recv_tds","rec_td"],
+}
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Ensure types and helpful derived fields
+    """Light sanitation: strip spaces, coerce numerics where sensible."""
+    if df.empty:
+        return df
     out = df.copy()
-    wk = detect_week_column(out)
-    if wk:
-        out[wk] = pd.to_numeric(out[wk], errors="coerce").fillna(0).astype(int)
-    # unify touchdowns combos for convenience (if present)
-    rush_td = find_stat_column(out, "Rushing TDs")
-    rec_td  = find_stat_column(out, "Receiving TDs")
-    if rush_td or rec_td:
-        out["_RR_TDs"] = 0.0
-        if rush_td: out["_RR_TDs"] += pd.to_numeric(out[rush_td], errors="coerce").fillna(0)
-        if rec_td:  out["_RR_TDs"] += pd.to_numeric(out[rec_td], errors="coerce").fillna(0)
+    out.columns = [str(c).strip() for c in out.columns]
+    # try numeric coercion for any stat-like column
+    for c in out.columns:
+        if any(k.lower() in str(c).lower() for k in ["yard","yd","td","rec","cmp","att","mean","avg","proj","score"]):
+            out[c] = pd.to_numeric(out[c], errors="ignore")
     return out
 
-# ---------- Market ➜ column mapping ----------
-# We search columns by flexible keywords to succeed across JSON variations.
-def find_stat_column(df: pd.DataFrame, market: str) -> str | None:
-    cols = list(df.columns)
-
-    # helper: search by multiple keyword alternatives (all must appear in the column)
-    def by_keywords(options: list[list[str]]):
-        # options is list of AND-keyword lists to try
-        low = [c.lower() for c in cols]
-        for and_keys in options:
-            for i, lc in enumerate(low):
-                if all(k.lower() in lc for k in and_keys):
-                    return cols[i]
+# ---- market accessors ----
+def get_market_series(df: pd.DataFrame, market: str) -> Optional[pd.Series]:
+    """Return a numeric Series for the chosen market, or None if not found."""
+    if df is None or df.empty:
         return None
-
-    if market == "Passing Yards":
-        return by_keywords([["passing", "yard"], ["pass", "yard"], ["py"]]) or \
-               _detect_one(df, ["PassingYards", "PassYards"])
-
-    if market == "Rushing Yards":
-        return by_keywords([["rushing", "yard"], ["rush", "yard"], ["ry"]]) or \
-               _detect_one(df, ["RushingYards"])
-
-    if market == "Receiving Yards":
-        return by_keywords([["receiving", "yard"], ["recv", "yard"], ["rec", "yard"]]) or \
-               _detect_one(df, ["ReceivingYards"])
-
-    if market == "Receptions":
-        return by_keywords([["receptions"], ["reception"], ["rec"]]) or \
-               _detect_one(df, ["Receptions"])
-
-    if market == "Passing TDs":
-        return by_keywords([["passing", "td"], ["pass", "td"]]) or _detect_one(df, ["PassingTouchdowns"])
-
-    if market == "Rushing TDs":
-        return by_keywords([["rushing", "td"], ["rush", "td"]]) or _detect_one(df, ["RushingTouchdowns"])
-
-    if market == "Receiving TDs":
-        return by_keywords([["receiving", "td"], ["recv", "td"], ["rec", "td"]]) or _detect_one(df, ["ReceivingTouchdowns"])
 
     if market == "Rushing+Receiving TDs":
-        # synthetic handled later using _RR_TDs
-        if "_RR_TDs" in df.columns:
-            return "_RR_TDs"
-        # fallback find individually
-        r = find_stat_column(df, "Rushing TDs")
-        rc = find_stat_column(df, "Receiving TDs")
-        if r or rc:
-            return "_RR_TDs"  # will be created by standardize_columns
-        return None
+        r = _series_for(df, "Rushing TDs")
+        e = _series_for(df, "Receiving TDs")
+        if r is None and e is None:
+            return None
+        r = r if r is not None else pd.Series([0]*len(df))
+        e = e if e is not None else pd.Series([0]*len(df))
+        return (pd.to_numeric(r, errors="coerce").fillna(0) + pd.to_numeric(e, errors="coerce").fillna(0))
 
+    return _series_for(df, market)
+
+def _series_for(df: pd.DataFrame, market: str) -> Optional[pd.Series]:
+    # exact column?
+    if market in df.columns:
+        return pd.to_numeric(df[market], errors="coerce")
+
+    # try canonical list
+    if market in _CANON_MAP:
+        for alt in _CANON_MAP[market]:
+            c = _first_match(df, [alt])
+            if c:
+                return pd.to_numeric(df[c], errors="coerce")
+    # last-ditch substring search
+    key = market.split()[0].lower()  # 'passing', 'rushing', 'receiving', etc.
+    for c in df.columns:
+        if key in c.lower() and any(k in c.lower() for k in ["yd","yard","td","rec"]):
+            return pd.to_numeric(df[c], errors="coerce")
     return None
 
-# ---------- Series extraction & probability ----------
-def get_player_market_series(df: pd.DataFrame, player_name: str, market: str,
-                             opponent: str|None, lookback_weeks: int):
-    """Return (series, meta) for given player/market filtered to last N weeks."""
-    name_col = detect_name_column(df)
-    if not name_col:
-        return pd.Series(dtype=float), {"recent_df": pd.DataFrame()}
-
-    # Filter player rows
-    d = df[df[name_col].astype(str).str.lower() == str(player_name).lower()].copy()
-    # Opp filter if we have an opp column + user provided one
-    opp_col = detect_opp_column(df)
-    if opponent and opp_col:
-        d = d[d[opp_col].astype(str).str.upper() == str(opponent).upper()]
-
-    # sort by inferred "Week" or row order
-    wk = detect_week_column(df)
-    if wk and wk in d.columns:
-        d = d.sort_values(wk, ascending=False)
-    else:
-        d = d.reset_index(drop=True)
-
-    # detect stat column
-    col = find_stat_column(df, market)
-    if (not col) or (col not in d.columns):
-        # give empty series
-        return pd.Series(dtype=float), {"recent_df": pd.DataFrame()}
-
-    # sanitize numeric
-    s = pd.to_numeric(d[col], errors="coerce").fillna(0.0)
-
-    # take last N entries
-    s_lb = s.head(int(max(1, lookback_weeks)))
-
-    # Build recent table with some common columns
-    show_cols = [c for c in [detect_week_column(df), name_col, detect_opp_column(df),
-                             "PassingYards", "RushingYards", "ReceivingYards",
-                             "PassingTouchdowns", "RushingTouchdowns", "ReceivingTouchdowns"] if c in d.columns]
-    recent = d.loc[s_lb.index, show_cols].copy() if show_cols else pd.DataFrame()
-
-    return s_lb.reset_index(drop=True), {
-        "recent_df": recent
-    }
-
-def probability_from_history(series: pd.Series, market: str, line: float) -> dict:
-    """Return dict with p_over, p_under, pred_mean, histogram df (or None)."""
-    s = pd.to_numeric(series, errors="coerce").dropna()
-    out = {"p_over": 0.5, "p_under": 0.5, "pred_mean": 0.0, "histogram": None}
-    if s.empty:
-        return out
-
-    mean = float(np.mean(s))
-    out["pred_mean"] = mean
-
-    # TD markets are count-like -> Poisson is a decent approximation
-    if "TDs" in market:
-        lam = max(1e-6, float(np.mean(s)))
-        # P(X >= k) with k as ceil(line + 1e-9)
-        k = int(math.floor(line + 1e-9) + 1)
-        p_ge = 1.0 - poisson.cdf(k-1, lam)
-        out["p_over"] = float(p_ge)
-        out["p_under"] = float(1.0 - p_ge)
-    else:
-        sd = float(np.std(s, ddof=1)) if len(s) > 1 else max(1.0, abs(mean)*0.25)
-        # Normal approx
-        z = (line - mean) / (sd + 1e-9)
-        p_under = float(norm.cdf(z))
-        p_over  = float(1.0 - p_under)
-        out["p_over"] = p_over
-        out["p_under"] = p_under
-
-    # histogram for preview
-    try:
-        out["histogram"] = pd.DataFrame({"value": s})
-    except Exception:
-        out["histogram"] = None
-
+def columns_for_table(df: pd.DataFrame, market: str, name_col: str, opp_col: str, week_col: str) -> List[str]:
+    cols = [week_col, name_col]
+    m = get_market_series(df, market)
+    if m is not None:
+        # find the actual source column name we used
+        src = m.name if isinstance(m, pd.Series) and m.name else None
+        if src and src in df.columns and src not in cols:
+            cols.append(src)
+    if opp_col in df.columns:
+        cols.append(opp_col)
+    # add a couple of useful columns if present
+    for extra in ["ScoreID","Score","PlayerGameID","FanDuelSalary","DraftKingsSalary","FantasyDataSalary","GlobalOpponentID","OpponentID"]:
+        if extra in df.columns and extra not in cols:
+            cols.append(extra)
+    # dedupe while keeping order
+    seen = set(); out = []
+    for c in cols:
+        if c not in seen:
+            out.append(c); seen.add(c)
     return out
 
-def confidence_from_series(series: pd.Series, market: str) -> tuple[float, str]:
-    """Return (confidence in 0..1, label). Uses sample size and dispersion."""
-    s = pd.to_numeric(series, errors="coerce").dropna()
-    if s.empty:
-        return 0.0, "Low Confidence"
-    n = len(s)
-    if "TDs" in market:
-        # dispersion measured by sqrt(lambda)
-        lam = np.mean(s)
-        disp = math.sqrt(lam + 1e-9)
-    else:
-        m = np.mean(s)
-        sd = np.std(s) if n > 1 else max(1.0, abs(m)*0.25)
-        disp = sd / (abs(m) + 1e-9)
-    # combine
-    conf = min(1.0, 0.25 + 0.1*n + 0.4*(1.0/(1.0+disp)))
-    label = "High Confidence" if conf >= 0.75 else ("Moderate Confidence" if conf >= 0.5 else "Low Confidence")
-    return float(conf), label
+# ---- slicing & features ----
+def slice_player(data: pd.DataFrame, player: str, opponent: str, lookback_weeks: int, week_col: str, name_col: str) -> pd.DataFrame:
+    df = data.copy()
+    df = df[df[name_col].astype(str).str.lower() == str(player).lower()]
+    if opponent:
+        opp_col = detect_opponent_column(data)
+        if opp_col in df.columns:
+            df = df[df[opp_col].astype(str).str.contains(opponent, case=False, na=False)]
+    # recent N weeks
+    if week_col in df.columns:
+        try:
+            df = df.sort_values(week_col, ascending=False)
+        except Exception:
+            df = df.sort_values(by=df.index, ascending=False)
+    return df.head(max(lookback_weeks, 1)).reset_index(drop=True)
 
-# ---------- Parlay correlation ----------
-def joint_probability_with_correlation(probs: list[float], labels: list[tuple[str,str,str]]) -> float:
+# ---- AI-ish projection (robust, fast) ----
+def predict_market(pdf: pd.DataFrame, target: pd.Series, market: str) -> float:
     """
-    Conservative adjustment:
-    - Multiply raw probabilities
-    - For any pair in same team or same player, apply a 0.95 penalty (light positive correlation)
-    - Cap result to [1e-6, 1-1e-6]
+    If ≥ 6 samples, use weighted moving average (heavier on last 3).
+    Else simply mean of available.
+    (Keeping it fast & stable; your repo already has xgboost in requirements
+     so you can extend this to a full model later.)
     """
-    base = 1.0
-    for p in probs:
-        base *= max(1e-6, min(1-1e-6, p))
+    y = pd.to_numeric(target, errors="coerce").dropna()
+    if y.empty:
+        return 0.0
+    n = len(y)
+    if n >= 6:
+        w = np.linspace(1.0, 2.0, num=n)  # up-weight recent games
+        return float(np.average(y.values[::-1], weights=w))  # recent first
+    return float(y.mean())
 
-    # light correlation penalties
-    penalty = 1.0
-    for i in range(len(labels)):
-        for j in range(i+1, len(labels)):
-            p1, opp1, m1 = labels[i]
-            p2, opp2, m2 = labels[j]
-            if (p1 == p2) or (opp1 == opp2) or (m1 == m2):
-                penalty *= 0.95  # 5% haircut
+# ---- probability math (Normal approx; no SciPy) ----
+def _normal_cdf(x: float, mu: float, sigma: float) -> float:
+    if sigma <= 1e-6:
+        return 1.0 if x >= mu else 0.0
+    z = (x - mu) / (sigma * math.sqrt(2.0))
+    return 0.5 * (1.0 + math.erf(z))
 
-    out = max(1e-6, min(1-1e-6, base * penalty))
-    return float(out)
+def prob_over_under(target: pd.Series, mu: float, line: float, market: str) -> Tuple[float, float, float]:
+    """Return (P_over, P_under, sigma)."""
+    y = pd.to_numeric(target, errors="coerce").dropna()
+    if y.empty:
+        return 0.5, 0.5, 1.0
+    # robust std: if too small, inflate slightly to avoid degenerate probs
+    sigma = float(np.nanstd(y.values, ddof=1))
+    if not np.isfinite(sigma) or sigma < 1.0:
+        sigma = max(1.0, abs(mu) * 0.20)
+    p_over = 1.0 - _normal_cdf(line, mu, sigma)
+    p_over = float(np.clip(p_over, 0.0, 1.0))
+    return p_over, 1.0 - p_over, sigma
+
+# ---- confidence score ----
+def confidence_score(series: pd.Series, sigma: float, lookback: int) -> Tuple[float, List[str]]:
+    y = pd.to_numeric(series, errors="coerce").dropna()
+    n = len(y)
+    if n == 0:
+        return 0.0, ["no samples"]
+    base = min(1.0, n / 8.0)  # saturate by 8 samples
+    dispersion = 1.0 / (1.0 + (sigma / (abs(np.mean(y)) + 1e-6)))
+    recent = min(1.0, lookback / 8.0)
+    score = 0.5 * base + 0.3 * dispersion + 0.2 * recent
+    return float(score), []
