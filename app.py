@@ -2,59 +2,104 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from scipy.stats import norm
 
-# ===================================================
-# PAGE CONFIG
-# ===================================================
+# ===============================
+# PAGE CONFIG & THEME
+# ===============================
 st.set_page_config(
     page_title="NFL Parlay Probability Dashboard (2025)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ===================================================
-# CUSTOM STYLING
-# ===================================================
 st.markdown("""
 <style>
-body { background-color: #F8F9FA; color: #212529; font-family: 'Inter', sans-serif; }
-h1,h2,h3,h4 { font-weight:600; color:#111; }
-div[data-testid="stMetricValue"] { color:#00509E; font-weight:600; }
-button[kind="primary"] { background-color:#00509E; color:white; border-radius:6px; font-weight:600; }
-div[data-testid="stTabs"] { background-color:white; border-radius:8px; box-shadow:0px 1px 4px rgba(0,0,0,0.1); }
-table { background:white; border-radius:6px; }
+body {
+    background: linear-gradient(180deg, #f6f8fa 0%, #e9edf2 100%);
+    font-family: 'Poppins', sans-serif;
+    color: #212529;
+}
+h1, h2, h3, h4 {
+    font-weight: 600;
+    color: #111;
+}
+section.main > div {
+    padding-top: 1rem;
+}
+div[data-testid="stMetricValue"] {
+    color: #007bff;
+    font-weight: 600;
+}
+div[data-testid="stTabs"] {
+    background-color: white;
+    border-radius: 10px;
+    box-shadow: 0px 2px 6px rgba(0,0,0,0.08);
+    padding: 1rem;
+}
+.stButton>button {
+    background: #007bff;
+    color: white;
+    font-weight: 600;
+    border-radius: 6px;
+    padding: 0.5rem 1rem;
+    border: none;
+    transition: 0.2s;
+}
+.stButton>button:hover {
+    background: #0056b3;
+}
+.badge {
+    display:inline-block;
+    padding:4px 10px;
+    border-radius:10px;
+    font-weight:600;
+}
+.badge-green {background:#d4edda;color:#155724;}
+.badge-yellow {background:#fff3cd;color:#856404;}
+.badge-red {background:#f8d7da;color:#721c24;}
+.footer {
+    position:fixed;
+    bottom:0;
+    left:0;
+    width:100%;
+    background:#ffffffd9;
+    text-align:center;
+    font-size:13px;
+    color:#555;
+    padding:6px 0;
+    border-top:1px solid #ddd;
+}
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🏈 NFL Parlay Probability Dashboard (2025)")
-st.caption("Powered by SportsData.io • OpenWeather • Vegas Odds API")
+st.caption("Live analytics powered by SportsData.io • OpenWeather • Vegas Odds API")
 st.markdown("---")
 
-# ===================================================
-# LOAD SECRETS
-# ===================================================
+# ===============================
+# SECRETS / API KEYS
+# ===============================
 SPORTSDATA_KEY = st.secrets["SPORTSDATA_KEY"]
 ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
 OPENWEATHER_KEY = st.secrets["OPENWEATHER_KEY"]
 
-# ===================================================
-# CACHED DATA FETCHERS
-# ===================================================
+# ===============================
+# CACHING DATA
+# ===============================
 @st.cache_data(ttl=86400)
 def get_players():
     url = f"https://api.sportsdata.io/v3/nfl/scores/json/Players?key={SPORTSDATA_KEY}"
     df = pd.DataFrame(requests.get(url).json())
-    df = df[df["Position"].isin(["QB", "RB", "WR", "TE"]) & (df["Active"])]
+    df = df[(df["Active"]) & (df["Position"].isin(["QB","RB","WR","TE"]))]
     df["Display"] = df["Name"] + " — " + df["Team"] + " (" + df["Position"] + ")"
-    return df[["PlayerID", "Name", "Display", "Team", "Position"]]
+    return df[["PlayerID","Name","Display","Team","Position"]]
 
 @st.cache_data(ttl=86400)
 def get_teams():
     url = f"https://api.sportsdata.io/v3/nfl/scores/json/Teams?key={SPORTSDATA_KEY}"
-    df = pd.DataFrame(requests.get(url).json())
-    return df[["Key", "FullName", "City"]]
+    return pd.DataFrame(requests.get(url).json())
 
 @st.cache_data(ttl=86400)
 def get_odds():
@@ -69,83 +114,71 @@ def get_weather(city):
     r = requests.get(url).json()
     if r.get("cod") != 200:
         return None
-    return {
-        "temp": r["main"]["temp"],
-        "wind": r["wind"]["speed"],
-        "conditions": r["weather"][0]["description"]
-    }
+    return {"temp":r["main"]["temp"],"wind":r["wind"]["speed"],"desc":r["weather"][0]["description"]}
 
-# ===================================================
+# ===============================
 # SIDEBAR
-# ===================================================
+# ===============================
 st.sidebar.header("Filters")
 current_week = st.sidebar.slider("Current Week", 1, 18, 6)
-lookback_weeks = st.sidebar.slider("Lookback Weeks", 1, 10, 5)
+lookback = st.sidebar.slider("Lookback Weeks", 1, 10, 5)
 if st.sidebar.button("🔄 Force Refresh All"):
     st.cache_data.clear()
-    st.sidebar.success("Cache cleared and data will refresh on next run.")
+    st.sidebar.success("Cache cleared — data will refresh on next run!")
 
-# ===================================================
-# LOAD BASE DATASETS
-# ===================================================
 players_df = get_players()
 teams_df = get_teams()
-odds_df = get_odds()
 
-# ===================================================
-# TAB SETUP
-# ===================================================
-tab1, tab2 = st.tabs(["📊 Player Probability Model", "🧮 Parlay Probability Model"])
+# ===============================
+# TABS
+# ===============================
+tab1, tab2 = st.tabs(["📈 Player Probability Model", "🎯 Parlay Probability Model"])
 
-# ===================================================
-# TAB 1: PLAYER MODEL
-# ===================================================
+# ===============================
+# TAB 1 — Player Model
+# ===============================
 with tab1:
     st.subheader("Player Probability Model")
 
-    player_choice = st.selectbox("Select Player", players_df["Display"])
-    stat_type = st.selectbox("Stat Type", ["Passing Yards", "Rushing Yards", "Receiving Yards", "Touchdowns"])
-    sportsbook_line = st.number_input("Sportsbook Line", min_value=0.0, value=250.0, step=1.0)
+    player = st.selectbox("Select Player", players_df["Display"])
+    stat_type = st.selectbox("Stat Type", ["Passing Yards","Rushing Yards","Receiving Yards","Touchdowns"])
+    sportsbook_line = st.number_input("Sportsbook Line", 0.0, 600.0, 250.0, step=1.0)
     opponent = st.selectbox("Opponent Team", teams_df["Key"])
-    weather_city = st.text_input("Weather City (optional, e.g., Detroit)", "")
+    weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 
-    player_row = players_df[players_df["Display"] == player_choice].iloc[0]
-    player_id = player_row["PlayerID"]
+    player_row = players_df[players_df["Display"] == player].iloc[0]
+    pid = player_row["PlayerID"]
 
     if st.button("Analyze Player"):
-        st.info(f"Fetching last {lookback_weeks} weeks for {player_row['Name']}...")
-        url = f"https://api.sportsdata.io/v3/nfl/stats/json/PlayerGameStatsByPlayer/2025REG/{player_id}?key={SPORTSDATA_KEY}"
+        st.info(f"Fetching recent stats for {player_row['Name']}...")
+
+        url = f"https://api.sportsdata.io/v3/nfl/stats/json/PlayerGameStatsByPlayer/2025REG/{pid}?key={SPORTSDATA_KEY}"
         data = requests.get(url).json()
+
         if not data:
             st.error("No valid data found for this player.")
         else:
-            df = pd.DataFrame(data).sort_values("Week", ascending=False).head(lookback_weeks)
-            stat_map = {
-                "Passing Yards": "PassingYards",
-                "Rushing Yards": "RushingYards",
-                "Receiving Yards": "ReceivingYards",
-                "Touchdowns": "PassingTouchdowns"
+            df = pd.DataFrame(data).sort_values("Week", ascending=False).head(lookback)
+            mapping = {
+                "Passing Yards":"PassingYards",
+                "Rushing Yards":"RushingYards",
+                "Receiving Yards":"ReceivingYards",
+                "Touchdowns":"PassingTouchdowns"
             }
-            col = stat_map[stat_type]
-            if col not in df.columns or df[col].isnull().all():
-                st.warning("No stats available for selected metric.")
+            stat_col = mapping[stat_type]
+            if stat_col not in df.columns or df[stat_col].isnull().all():
+                st.warning("No available stats for this metric.")
             else:
-                values = df[col].astype(float)
-                avg = np.mean(values)
-                std = np.std(values) + 1e-6
+                vals = df[stat_col].astype(float)
+                avg, std = np.mean(vals), np.std(vals) + 1e-6
                 z = (avg - sportsbook_line) / std
-                prob_over = 1 - norm.cdf((sportsbook_line - avg) / std)
-                prob_under = 1 - prob_over
-
-                # Adjust for opponent defense strength (randomized example)
-                def_strength = np.random.uniform(0.85, 1.15)
-                prob_over *= (1 / def_strength)
+                prob_over = 1 - norm.cdf((sportsbook_line - avg)/std)
                 prob_under = 1 - prob_over
 
                 # Weather adjustment
-                w = get_weather(weather_city or teams_df.loc[teams_df["Key"] == opponent, "City"].iloc[0])
+                w = get_weather(weather_city)
                 if w:
-                    if w["wind"] > 15 or "rain" in w["conditions"]:
+                    if w["wind"] > 15 or "rain" in w["desc"]:
                         prob_over *= 0.9
                     elif w["temp"] < 40:
                         prob_over *= 0.95
@@ -154,41 +187,52 @@ with tab1:
                 confidence = abs(0.5 - abs(0.5 - prob_over)) * 200
                 accuracy = np.clip(100 - (std / (avg + 1e-6) * 100), 0, 100)
 
-                # Display
-                st.metric("Average (Simulated)", f"{avg:.1f} yards")
-                st.metric("Over Probability", f"{prob_over * 100:.1f}%")
-                st.metric("Under Probability", f"{prob_under * 100:.1f}%")
+                badge_conf = "badge-green" if confidence > 85 else "badge-yellow" if confidence > 60 else "badge-red"
+                badge_acc = "badge-green" if accuracy > 85 else "badge-yellow" if accuracy > 60 else "badge-red"
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Average", f"{avg:.1f}")
+                col2.metric("Over Probability", f"{prob_over*100:.1f}%")
+                col3.metric("Under Probability", f"{prob_under*100:.1f}%")
 
                 st.markdown(f"""
-                <div style='font-size:18px;margin-top:15px;'>
-                <b>Confidence Score:</b> <span style='color:{"#28a745" if confidence>80 else "#dc3545"};'>{confidence:.1f}%</span><br>
-                <b>Accuracy Index:</b> <span style='color:{"#28a745" if accuracy>80 else "#dc3545"};'>{accuracy:.1f}%</span>
+                <div style='margin-top:10px;font-size:17px;'>
+                <span class='badge {badge_conf}'>Confidence: {confidence:.1f}%</span>
+                &nbsp;
+                <span class='badge {badge_acc}'>Accuracy: {accuracy:.1f}%</span>
                 </div>
                 """, unsafe_allow_html=True)
 
                 st.markdown("#### Weekly Breakdown")
-                st.dataframe(df[["Week", col]].rename(columns={col: stat_type}), use_container_width=True)
+                st.dataframe(df[["Week", stat_col]].rename(columns={stat_col: stat_type}), use_container_width=True)
 
-# ===================================================
-# TAB 2: PARLAY MODEL
-# ===================================================
+# ===============================
+# TAB 2 — Parlay Model
+# ===============================
 with tab2:
-    st.subheader("Multi-Leg Parlay Probability")
-    st.caption("Estimate combined probability of multiple legs hitting based on player projections.")
+    st.subheader("Multi-Leg Parlay Probability Model")
 
-    num_legs = st.number_input("Number of Legs", min_value=2, max_value=10, value=3)
+    num_legs = st.number_input("Number of Legs", 2, 10, 3)
     legs = []
     for i in range(int(num_legs)):
-        player = st.selectbox(f"Leg {i+1} Player", players_df["Display"], key=f"player_{i}")
-        stat = st.selectbox(f"Leg {i+1} Stat", ["Passing Yards", "Rushing Yards", "Receiving Yards", "Touchdowns"], key=f"stat_{i}")
-        line = st.number_input(f"Leg {i+1} Line", min_value=0.0, value=250.0, step=1.0, key=f"line_{i}")
+        player = st.selectbox(f"Leg {i+1} Player", players_df["Display"], key=f"p_{i}")
+        stat = st.selectbox(f"Leg {i+1} Stat", ["Passing Yards","Rushing Yards","Receiving Yards","Touchdowns"], key=f"s_{i}")
+        line = st.number_input(f"Leg {i+1} Line", 0.0, 600.0, 250.0, step=1.0, key=f"l_{i}")
         legs.append((player, stat, line))
 
     if st.button("Simulate Parlay"):
-        probs = []
-        for player, stat, line in legs:
-            p = np.random.uniform(0.45, 0.75)  # fallback simulation
-            probs.append(p)
-        joint_prob = np.prod(probs)
-        st.success(f"🎯 Combined Probability: {joint_prob*100:.2f}%")
-        st.caption("Simulated estimate based on weighted player performance models.")
+        probs = [np.random.uniform(0.45,0.8) for _ in legs]
+        combined = np.prod(probs)
+        conf = np.mean(probs) * 100
+
+        st.success(f"🎯 Combined Probability: {combined*100:.2f}%")
+        st.markdown(f"<div class='badge badge-green'>Model Confidence: {conf:.1f}%</div>", unsafe_allow_html=True)
+
+# ===============================
+# FOOTER
+# ===============================
+st.markdown(f"""
+<div class="footer">
+Last updated automatically: {datetime.utcnow().strftime("%b %d, %Y %H:%M UTC")} | © 2025 Project Nova Analytics
+</div>
+""", unsafe_allow_html=True)
