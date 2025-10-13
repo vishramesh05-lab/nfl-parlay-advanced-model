@@ -1,7 +1,9 @@
-streamlit>=1.37
-pandas
-numpy
-requests
-plotly
-beautifulsoup4
-scipy
+streamlit==1.37.0
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.3
+plotly==5.23.0
+beautifulsoup4==4.12.3
+scipy==1.13.1
+python-dateutil==2.9.0
+tenacity==8.2.3
