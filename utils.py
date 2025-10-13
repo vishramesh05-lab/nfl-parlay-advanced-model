@@ -1,7 +1,11 @@
 import os, json, time, random, pandas as pd
 from datetime import datetime, timedelta
 
-DATA_PATH = os.path.join(os.getcwd(), "data")
+# Ensure data folder exists regardless of Streamlit environment
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_PATH, exist_ok=True)
+
 MODEL_FILE = os.path.join(DATA_PATH, "ai_model.pkl")
 LAST_RETRAIN_FILE = os.path.join(DATA_PATH, "last_retrain.txt")
 
@@ -30,7 +34,7 @@ def merge_jsons():
 # RETRAIN LOGIC
 # -----------------------------
 def retrain_ai():
-    """Simulate AI retraining (placeholder for future ML integration)."""
+    """Simulated AI retraining placeholder."""
     time.sleep(2)
     with open(LAST_RETRAIN_FILE, "w") as f:
         f.write(datetime.utcnow().isoformat())
@@ -43,17 +47,18 @@ def get_last_retrain_time():
     return "Never"
 
 def maybe_retrain():
-    """Retrains every 30 minutes + nightly 12 AM EST."""
+    """Retrains every 30 minutes or nightly at 12 AM EST (4 UTC)."""
     now = datetime.utcnow()
     if not os.path.exists(LAST_RETRAIN_FILE):
         retrain_ai(); return True
-    last = datetime.fromisoformat(open(LAST_RETRAIN_FILE).read().strip())
-    if (now - last) > timedelta(minutes=30) or now.hour == 4:  # 4 UTC ≈ 12 AM EST
+    with open(LAST_RETRAIN_FILE) as f:
+        last = datetime.fromisoformat(f.read().strip())
+    if (now - last) > timedelta(minutes=30) or now.hour == 4:
         retrain_ai(); return True
     return False
 
 # -----------------------------
-# PLAYER + PROBABILITY FUNCTIONS
+# PLAYER & PROBABILITY FUNCTIONS
 # -----------------------------
 def get_player_dropdown():
     return [
@@ -68,14 +73,8 @@ def fetch_player_data(player, stat_type):
     try:
         df = merge_jsons()
         if df.empty: return None
-        df = df[df.get("playerName", "").str.contains(player.split("—")[0].strip(), case=False, na=False)]
-        if stat_type.lower().startswith("passing"):
-            df = df[df.columns[df.columns.str.contains("Passing", case=False)]]
-        elif stat_type.lower().startswith("rushing"):
-            df = df[df.columns[df.columns.str.contains("Rushing", case=False)]]
-        elif stat_type.lower().startswith("receiving"):
-            df = df[df.columns[df.columns.str.contains("Receiving", case=False)]]
-        return df if not df.empty else None
+        df = df[df.apply(lambda r: player.split("—")[0].strip().lower() in str(r).lower(), axis=1)]
+        return df
     except Exception:
         return None
 
