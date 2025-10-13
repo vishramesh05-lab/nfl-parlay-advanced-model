@@ -1,13 +1,13 @@
-# 🏈 NFL Parlay Helper (Kaggle vA51)
-# Build: Weekly-Updatable Local Dataset Model
-# Source: Kaggle Big Data Bowl 2025 + OpenWeather
-# Author: Vishvin Ramesh
+# 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
+# Data: Kaggle Big Data Bowl 2025 + Optional OpenWeather Adjustments
+# Build vA53 | Vishvin Ramesh
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import requests
+import chardet
 from datetime import datetime
 
 # ----------------------------------------------------
@@ -19,8 +19,8 @@ st.set_page_config(
     page_icon="🏈"
 )
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025 - Kaggle Edition)</h1>", unsafe_allow_html=True)
-st.caption("Data: Kaggle Big Data Bowl 2025 (Weekly) + Optional OpenWeather Adjustments")
-st.caption("Build vA51 | Vishvin Ramesh")
+st.caption("Data: Kaggle Big Data Bowl 2025 (Weekly Updates) + OpenWeather Adjustments")
+st.caption("Build vA53 | by Vishvin Ramesh")
 
 # ----------------------------------------------------
 # SIDEBAR FILTERS
@@ -30,11 +30,11 @@ current_week = st.sidebar.slider("Current week", 1, 18, 6)
 lookback_weeks = st.sidebar.slider("Lookback (weeks)", 1, 8, 5)
 
 # ----------------------------------------------------
-# INPUTS
+# INPUT FIELDS
 # ----------------------------------------------------
 player_name = st.text_input("Player Name", placeholder="e.g. Patrick Mahomes")
 stat_type = st.selectbox("Stat Type", ["Passing Yards", "Rushing Yards", "Receiving Yards"])
-sportsbook_line = st.number_input("Sportsbook Line", step=0.5)
+sportsbook_line = st.number_input("Sportsbook Line", step=0.5, format="%.1f")
 opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)")
 weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 
@@ -42,24 +42,39 @@ weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 # CONSTANTS
 # ----------------------------------------------------
 DATA_FILE = "nfl_2025_player_stats.csv"
-OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")
+OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")  # Add in Streamlit Secrets if available
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
 # ----------------------------------------------------
 # FUNCTIONS
 # ----------------------------------------------------
+def detect_encoding(file_path):
+    """Detects encoding for robust CSV reading."""
+    with open(file_path, "rb") as f:
+        raw_data = f.read(2048)
+        result = chardet.detect(raw_data)
+        return result["encoding"]
+
 @st.cache_data(ttl=3600)
-def load_kaggle_data():
-    """Load Kaggle NFL player stats from local CSV."""
+def load_data(uploaded_file=None):
+    """Load Kaggle data either from upload or repo, auto-detect encoding."""
     try:
-        df = pd.read_csv(DATA_FILE)
+        if uploaded_file is not None:
+            raw_bytes = uploaded_file.read()
+            detected = chardet.detect(raw_bytes)
+            encoding_used = detected["encoding"] or "utf-8"
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding=encoding_used)
+        else:
+            encoding_used = detect_encoding(DATA_FILE)
+            df = pd.read_csv(DATA_FILE, encoding=encoding_used)
         df.columns = [c.lower().strip() for c in df.columns]
         return df
     except FileNotFoundError:
-        st.error(f"⚠️ File '{DATA_FILE}' not found. Upload it to your app folder.")
+        st.error("⚠️ Could not find the dataset file. Please upload the CSV below.")
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"❌ Error loading data: {e}")
         return pd.DataFrame()
 
 def fetch_weather(city):
@@ -83,24 +98,26 @@ def calc_prob(series, line, direction):
     return round(100 * hits / len(series), 1)
 
 # ----------------------------------------------------
-# RELOAD DATA BUTTON
+# DATA UPLOAD / RELOAD
 # ----------------------------------------------------
-if st.button("🔁 Reload Latest Kaggle Data", use_container_width=True):
+uploaded_file = st.file_uploader("📂 Upload new Kaggle 2025 CSV (optional)", type=["csv"])
+
+if st.button("🔁 Reload / Refresh Data", use_container_width=True):
     st.cache_data.clear()
-    st.success("Cache cleared — data will reload fresh on next run.")
+    st.success("✅ Cache cleared. New data will reload automatically!")
 
 # ----------------------------------------------------
 # MAIN ANALYSIS
 # ----------------------------------------------------
 if st.button("Analyze Player", use_container_width=True):
-    df = load_kaggle_data()
+    df = load_data(uploaded_file)
     if df.empty:
         st.stop()
 
     # Match player by name fragment
     matches = df[df["player"].str.contains(player_name, case=False, na=False)]
     if matches.empty:
-        st.warning(f"No data found for '{player_name}'. Try a shorter name fragment.")
+        st.warning(f"No data found for '{player_name}'. Try partial name (e.g. 'Mahomes').")
         st.stop()
 
     # Map stat type to column
@@ -109,16 +126,16 @@ if st.button("Analyze Player", use_container_width=True):
         "Rushing Yards": "rushing_yards",
         "Receiving Yards": "receiving_yards"
     }
-
     stat_col = stat_col_map[stat_type]
     if stat_col not in df.columns:
         st.error(f"Column '{stat_col}' not found in dataset.")
         st.stop()
 
+    # Subset player’s last N weeks
     player_df = matches[["week", stat_col]].sort_values("week").tail(lookback_weeks)
     player_df.rename(columns={stat_col: "value"}, inplace=True)
 
-    # Visualization
+    # Plot trend
     fig = px.bar(
         player_df, x="week", y="value", text="value",
         title=f"{player_name} — {stat_type} (Last {lookback_weeks} weeks)"
@@ -148,4 +165,4 @@ if st.button("Analyze Player", use_container_width=True):
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
-st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA51 | Weather: OpenWeather")
+st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA53 | by Vishvin Ramesh")
