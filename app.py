@@ -61,20 +61,38 @@ def fetch_footballdb_data():
         "Rushing Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=rushing",
         "Receiving Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=receiving"
     }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/118.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.footballdb.com/"
+    }
+
     all_data = []
     for cat, url in urls.items():
         try:
-            r = requests.get(url, timeout=15)
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()  # raise error if status != 200
             soup = BeautifulSoup(r.text, "html.parser")
             table = soup.find("table", {"class": "statistics"})
+            if not table:
+                st.warning(f"No table found for {cat}")
+                continue
             df = pd.read_html(str(table))[0]
             df["Category"] = cat
             all_data.append(df)
         except Exception as e:
+            st.warning(f"⚠️ Could not load {cat}: {e}")
             if debug_mode:
-                st.error(f"Error loading {cat}: {e}")
-    return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
+                st.exception(e)
 
+    if not all_data:
+        st.error("⚠️ FootballDB returned no data — site may be blocking requests or temporarily down.")
+        return pd.DataFrame()
+
+    return pd.concat(all_data, ignore_index=True)
 def fetch_weather(city):
     """Fetch weather and temperature."""
     if not city:
