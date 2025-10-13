@@ -1,5 +1,5 @@
 """
-NFL Parleggy AI Model v1.0
+NFL Parleggy AI Model v1.1
 Author: Vish (Project Nova Analytics)
 """
 
@@ -101,6 +101,6 @@ with tab2:
 # FOOTER
 # =============================
 st.markdown(
-    "<p style='text-align:center;color:#777;margin-top:3rem;'>© 2025 Project Nova Analytics | Data auto-updates every 30 min | High-accuracy AI model</p>",
+    "<p style='text-align:center;color:#777;margin-top:3rem;'>© 2025 Project Nova Analytics | Auto-updates every 30 min | High-accuracy AI model</p>",
     unsafe_allow_html=True,
 )
