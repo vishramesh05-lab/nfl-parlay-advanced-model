@@ -35,8 +35,16 @@ def merge_jsons():
         except Exception:
             pass
     if dfs:
-        df_all=pd.concat(dfs,ignore_index=True).fillna(0)
-        return df_all
+     if dfs:
+    try:
+        df_all = pd.concat(dfs, ignore_index=True).fillna(0)
+    except Exception as e:
+        st.error(f"⚠️ Error combining JSON files: {e}")
+        df_all = pd.DataFrame()
+    return df_all
+else:
+    st.warning("⚠️ No valid JSON files found in /data — skipping merge.")
+    return pd.DataFrame()
     return pd.DataFrame()
 
 # ---------------------- MODEL TRAIN ----------------------
