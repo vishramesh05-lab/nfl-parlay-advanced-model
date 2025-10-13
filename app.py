@@ -8,7 +8,52 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+# ==== Safe refresh & cache (Streamlit 1.37-safe) ====
+import streamlit as st
+from packaging import version
 
+# Show running version (useful in the header while we debug)
+st.caption(f"Streamlit {st.__version__}")
+
+def clear_caches_safely():
+    # Works on 1.18+; silently no-ops on older images
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    try:
+        st.cache_resource.clear()
+    except Exception:
+        pass
+
+clear_caches_safely()
+
+# Soft auto-refresh every 30 minutes without using experimental APIs
+REFRESH_MS = 30 * 60 * 1000
+st.markdown(
+    f"""
+    <script>
+      setTimeout(function() {{
+        if (document.visibilityState === 'visible') {{
+          window.location.reload();
+        }}
+      }}, {REFRESH_MS});
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
+# (Optional) if you were using query params, replace experimental call with this:
+def set_query_params(**kwargs):
+    # Writes a clean querystring via JS (avoids experimental call)
+    if not kwargs:
+        return
+    import json, urllib.parse
+    q = urllib.parse.urlencode(kwargs, doseq=True)
+    st.markdown(
+        f"<script>history.replaceState(null, '', location.pathname + '?{q}');</script>",
+        unsafe_allow_html=True,
+    )
 # ---------- Page / Style ----------
 st.set_page_config(
     page_title="NFL Parleggy AI Model",
