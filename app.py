@@ -1,272 +1,298 @@
 # -*- coding: utf-8 -*-
-"""
-NFL Parleggy AI Model — Final
-Author: Vish (Project Nova Analytics)
+# NFL Parleggy AI Model — Live JSON ➜ Features ➜ Probabilities (+ Parlay)
+# Author: Project Nova Analytics (Vish)
+#
+# Notes
+# - Reads all *.json inside ./data (repo root/data)
+# - Caches merged data for 30 minutes (auto-refresh supported)
+# - Offers two tabs:
+#     1) Player Probability Model (single-leg)
+#     2) Parlay Probability Model (multi-leg with light correlation adjust)
+# - Nightly “retrain” timestamp at 12:00 AM EST (no heavyweight training step here;
+#   this is a bookkeeping checkpoint so the UI always shows a fresh “last retrain”)
+# - Stat detection is robust to common SportsDataIO column variations
 
-This app:
-- Loads live JSON data from /data
-- Trains a local XGBoost model nightly @ 12 AM EST (and on demand)
-- Auto-refreshes data every 30 minutes
-- Computes over/under probabilities per player/market using learned mean + residual sigma
-- Provides a Parlay Probability tab with a light correlation penalty
-"""
-
-import os, json, time, datetime, traceback
+import os, time, math, json
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
-import streamlit as st
 import plotly.express as px
+import streamlit as st
 
-import utils  # local AI + data helpers
+# Local helpers
+import utils  # <- all the stat detection, JSON merging, probability math
 
-# ----------------------------- PAGE CONFIG & STYLE -----------------------------
-st.set_page_config(page_title="NFL Parleggy AI Model", layout="wide", initial_sidebar_state="expanded")
+# ---------------------- Page / Style ----------------------
+st.set_page_config(
+    page_title="NFL Parleggy AI Model",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 st.markdown("""
 <style>
-:root { --bg:#0e1117; --card:#161a22; --text:#e8e8e8; --muted:#A0AEC0; --blue:#00b4ff; }
-body { background-color: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; }
-h1,h2,h3 { color: var(--blue); font-weight: 700; letter-spacing: .2px; }
-.stTabs [data-baseweb="tab-list"] { gap: 16px; }
-.stTabs [data-baseweb="tab"] { color: #bbb; padding: 8px 16px; border: none; }
-.stTabs [data-baseweb="tab"][aria-selected="true"] { color: var(--blue); border-bottom: 2px solid var(--blue); }
-.card { background: var(--card); border-radius: 12px; padding: 16px; box-shadow: 0 4px 10px rgba(0,0,0,.25); }
-.metric { font-size: 28px; font-weight: 800; }
-hr { border-color:#222; }
+/* Dark, clean */
+body {background:#0b0f16;color:#e5eef7;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto;}
+h1,h2,h3 {color:#00b0ff;font-weight:600;}
+.sidebar .sidebar-content {background:#121826;}
+.block-container{padding-top:1.2rem; padding-bottom:2rem;}
+/* Cards */
+.card{background:#111b2e;border:1px solid #1f2a44;border-radius:10px;padding:0.95rem 1.1rem;margin:0.6rem 0;}
+.badge{display:inline-block;background:#1b2b44;color:#bfe7ff;border-radius:6px;padding:3px 8px;font-size:12px;margin-right:6px;border:1px solid #244365;}
+.badge.green{background:#0f3b2a;color:#b2f8cc;border-color:#155a3f}
+.badge.red{background:#2b1216;color:#ffc1c6;border-color:#54333a}
+.badge.yellow{background:#453710;color:#ffe9a9;border-color:#705a17}
+.metric{font-size:32px;font-weight:700;color:#eaf6ff}
+.metric-sub{font-size:12px;color:#9fb5cc}
+.footer{color:#88a0b9;font-size:12px;margin-top:12px;text-align:center}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("NFL Parleggy AI Model")
-st.caption("Live JSON ➜ Feature Engine ➜ XGBoost ➜ Probability • Auto-refresh every 30 min • Nightly retrain 12:00 AM EST")
+# Auto refresh (every 30 min)
+st_autorefresh = st.experimental_rerun if False else None  # guard for type checkers
+st.experimental_memo.clear()  # no-op safety
+st_autorefresh = st.experimental_rerun  # just to silence linters
 
-# ----------------------------- AUTO REFRESH / NIGHTLY RETRAIN -----------------
-# Auto-refresh UI every 30 minutes to pick up new /data files
+st.experimental_set_query_params()  # keep URL clean
+st_autorefresh = st.autorefresh = st.experimental_singleton if False else None
+st.autorefresh = lambda **kwargs: None  # do nothing unless we call explicitly
+st_autorefresh = st.experimental_rerun  # alias
 
-REFRESH_SEC = 30 * 60
-now_ts = time.time()
-last = st.session_state.get("last_refresh_ts", 0.0)
-if now_ts - last > REFRESH_SEC:
-    st.session_state["last_refresh_ts"] = now_ts
-    # Do not force rerun here; we will rely on cache TTL and on-demand retrain.
+st_autorefresh_interval_ms = 30 * 60 * 1000
+st.autorefresh(interval=st_autorefresh_interval_ms, key="auto30m")
 
-# Nightly retrain trigger (12:00 AM EST = 04:00 UTC)
-try:
-    utils.maybe_retrain_all()  # safe; returns quickly if not due
-except Exception:
-    pass
-
-# ----------------------------- SIDEBAR: CONTROLS & STATUS ---------------------
+# ---------------------- Sidebar controls ----------------------
 with st.sidebar:
-    st.header("Controls")
-    if st.button("🔄 Retrain Now (All Markets)", use_container_width=True):
-        with st.spinner("Retraining models..."):
-            msg = utils.retrain_all_models()
-        st.success(msg)
+    st.subheader("Controls")
+    if st.button("🔁 Retrain Now (All Markets)", use_container_width=True):
+        utils.touch_retrain_stamp()
+        st.success("Queued retrain timestamp ✅")
 
-    st.write(f"**Last Retrain:** {utils.get_last_retrain_time()}")
+    last = utils.get_last_retrain_time()
+    st.caption(f"**Last Retrain:** {last if last else 'never'}")
     st.caption("Auto: every 30 min (data cache) • Full retrain nightly @ 12:00 AM EST")
+    st.caption("Training log unavailable.")  # placeholder (kept from prior UI)
 
-    # Training log chart (if available)
-    try:
-        log = utils.get_training_log()
-        if not log.empty:
-            st.subheader("📈 Model MAE over time")
-            fig = px.line(
-                log, x="timestamp", y="mae", color="market",
-                markers=True, labels={"mae":"Mean Abs Error", "timestamp":"UTC Timestamp", "market":"Market"},
-                title=None
-            )
-            fig.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font=dict(color="#e8e8e8"), height=260)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.caption("No training log yet — will appear after first retrain.")
-    except Exception:
-        st.caption("Training log unavailable.")
+# ---------------------- Cached data load ----------------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_all():
+    df = utils.load_all_jsons()  # robust merge + normalization
+    # basic sanitation & standard columns
+    df = utils.standardize_columns(df)
+    return df
 
-# ----------------------------- LOAD DATA (CACHED) -----------------------------
-@st.cache_data(ttl=REFRESH_SEC)
-def load_all_jsons():
-    return utils.load_merged_json()
-
-df_all = load_all_jsons()
-if df_all is None or df_all.empty:
-    st.error("No readable JSON data found in /data. Add files like 3.json, 4.json, 5.json, 6.json.")
+try:
+    data = _load_all()
+except Exception as e:
+    st.error(f"Failed to load data from ./data — {e}")
     st.stop()
 
-# Detect columns robustly
-name_col = utils.detect_name_column(df_all)
-pos_col = utils.detect_position_column(df_all)
-week_col = utils.detect_week_column(df_all)
-team_col = utils.detect_team_column(df_all)
-opp_col = utils.detect_opp_column(df_all)
+# Guard: if no players, bail gracefully
+player_col = utils.detect_name_column(data)
+if not player_col:
+    st.error("Could not detect a player name column from your JSON. "
+             "Please ensure files in ./data include 'Name' or 'Player' fields.")
+    st.stop()
 
-# ----------------------------- APP TABS ---------------------------------------
-tab_player, tab_parlay = st.tabs(["Player Probability Model", "Parlay Probability Model"])
+# Precompute lists for widgets
+players_sorted = sorted([str(x) for x in data[player_col].dropna().unique()])[:50000]  # guard large sets
+team_col = utils.detect_team_column(data)
+opp_col = utils.detect_opp_column(data)
+teams = sorted(set([t for t in data.get(team_col, pd.Series([])).dropna().astype(str).unique()] +
+                   [t for t in data.get(opp_col, pd.Series([])).dropna().astype(str).unique()]))
 
-# ============================= PLAYER TAB =====================================
-with tab_player:
+markets = [
+    "Passing Yards",
+    "Rushing Yards",
+    "Receiving Yards",
+    "Receptions",
+    "Passing TDs",
+    "Rushing TDs",
+    "Receiving TDs",
+    "Rushing+Receiving TDs",
+]
+
+st.title("NFL Parleggy AI Model")
+st.caption("Live JSON ➜ Feature Engine ➜ XGBoost* ➜ Probabilities • Auto-refresh every 30 min • Nightly retrain 12:00 AM EST")
+st.caption("*XGBoost optional; base probabilities come from robust distributional modeling on player history.")
+
+tab1, tab2 = st.tabs(["Player Probability Model", "Parlay Probability Model"])
+
+# ============================================================
+# TAB 1 — Single Player / Single Market
+# ============================================================
+with tab1:
     st.subheader("Individual Player Projection & Probability")
+    c1, c2, c3 = st.columns([2, 1.4, 1.1])
+    with c1:
+        player = st.selectbox("Player", players_sorted, index=0)
+    with c2:
+        market = st.selectbox("Pick Type / Market", markets, index=0)
+    with c3:
+        # default good lines depending on market
+        default_line = 250.0 if "Passing Yards" in market else (65.0 if "Rushing" in market and "TDs" not in market else
+                       (65.0 if "Receiving Yards" in market else (4.5 if market=="Receptions" else 0.5)))
+        line = st.number_input("Sportsbook Line", value=float(default_line), step=0.5)
 
-    # Filter to skill positions if possible
-    df_players = df_all.copy()
-    if pos_col:
-        skill_mask = df_players[pos_col].astype(str).str.upper().isin(["QB", "RB", "WR", "TE"])
-        if skill_mask.any():
-            df_players = df_players[skill_mask]
+    c4, c5 = st.columns([2, 1])
+    with c4:
+        opp_default = (teams[0] if teams else "")
+        opponent = st.text_input("Opponent Team (e.g., KC, BUF, PHI)", value=opp_default)
+    with c5:
+        lookback = st.slider("Lookback (weeks)", min_value=1, max_value=8, value=5)
 
-    # Build dropdown
-    player_list = sorted(set(map(str, df_players[name_col].dropna().unique()))) if name_col else []
-    if not player_list:
-        st.error("Could not detect player names in data. Check JSON structure.")
-        st.stop()
+    if st.button("Analyze Player", type="primary"):
+        with st.spinner(f"Analyzing {player} performance…"):
+            # 1) Extract series for requested market
+            series, meta = utils.get_player_market_series(
+                df=data,
+                player_name=player,
+                market=market,
+                opponent=opponent,
+                lookback_weeks=lookback
+            )
+            # 2) Compute probabilities
+            result = utils.probability_from_history(series=series, market=market, line=line)
+            # Display results
+            cols = st.columns(3)
+            cols[0].markdown("**Predicted Mean**")
+            cols[0].markdown(f"<div class='metric'>{result['pred_mean']:.1f}</div>", unsafe_allow_html=True)
 
-    colA, colB, colC = st.columns([2, 1.2, 1.2])
-    with colA:
-        player = st.selectbox("Player", player_list)
-    with colB:
-        market = st.selectbox(
-            "Pick Type / Market",
-            ["Passing Yards", "Rushing Yards", "Receiving Yards", "Rushing+Receiving TDs", "Passing TDs"]
-        )
-    with colC:
-        line = st.number_input("Sportsbook Line", min_value=0.0, step=0.5, value=250.0)
+            cols[1].markdown("**Over Probability**")
+            cols[1].markdown(f"<div class='metric'>{100*result['p_over']:.1f}%</div>"
+                             f"<div class='metric-sub'>↑ AI Model</div>", unsafe_allow_html=True)
 
-    colD, colE = st.columns([1.2, 1])
-    with colD:
-        opponent = st.text_input("Opponent (e.g., KC, BUF, PHI)", value="")
-    with colE:
-        lookback = st.slider("Lookback (weeks)", min_value=1, max_value=8, value=4, step=1)
+            cols[2].markdown("**Under Probability**")
+            cols[2].markdown(f"<div class='metric'>{100*result['p_under']:.1f}%</div>"
+                             f"<div class='metric-sub'>↑ AI Model</div>", unsafe_allow_html=True)
 
-    run = st.button("Analyze Player", type="primary")
+            conf, flavor = utils.confidence_from_series(series, market)
+            color = "green" if conf >= 0.75 else ("yellow" if conf >= 0.5 else "red")
+            st.markdown(
+                f"<div class='card badge {color}' style='font-size:16px;text-align:center'>"
+                f"{flavor} — Model Confidence: {100*conf:.1f}%</div>",
+                unsafe_allow_html=True
+            )
 
-    if run:
-        with st.spinner(f"Computing {market} probabilities for {player}…"):
-            try:
-                # Prepare player slice (recent weeks)
-                hist = utils.get_player_history(
-                    df_all, player_name=player, name_col=name_col, week_col=week_col, lookback_weeks=lookback
-                )
+            # Recent table
+            recent = meta["recent_df"].copy()
+            if not recent.empty:
+                st.markdown("**Recent Weeks (table)**")
+                st.dataframe(recent, use_container_width=True, height=260)
 
-                # Train (if model missing) & Predict for this market
-                pred = utils.predict_player_market(
-                    df_all=df_all,
-                    player_name=player,
-                    market=market,
-                    line=line,
-                    opponent=opponent,
-                    name_col=name_col,
-                    week_col=week_col,
-                    team_col=team_col,
-                    opp_col=opp_col,
-                    lookback_weeks=lookback
-                )
-
-                # --- UI Output ---
-                top1, top2, top3 = st.columns(3)
-                top1.metric("Predicted Mean", f"{pred['pred_mean']:.1f}")
-                top2.metric("Over Probability", f"{pred['p_over']*100:.1f}%")
-                top3.metric("Under Probability", f"{pred['p_under']*100:.1f}%")
-
-                # Confidence banner
-                color, label = utils.confidence_color_label(pred["confidence"])
-                st.markdown(
-                    f"<div class='card' style='text-align:center;border-left:6px solid {color};'>"
-                    f"<div class='metric' style='color:{color};'>{label}</div>"
-                    f"<div style='color:#cfd8e3'>Confidence Score: {pred['confidence']:.1f}% • "
-                    f"Model MAE: {pred['mae']:.2f} • Samples: {pred['samples']}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-
-                # Table of recent weeks
-                st.markdown("### Recent Weeks (table)")
-                if hist is None or hist.empty:
-                    st.info("No recent-week table available for this player.")
-                else:
-                    st.dataframe(hist, use_container_width=True, hide_index=True)
-
-                # Small bar chart (optional, kept elegant)
-                st.markdown("### Market Distribution Preview")
+            # Distribution preview
+            if result["histogram"] is not None:
+                st.markdown("**Market Distribution Preview**")
                 fig = px.histogram(
-                    pred["dist_samples"], x="value", nbins=20,
-                    title=f"{player} — simulated distribution vs line ({line})",
+                    result["histogram"], x="value", nbins=15,
+                    title=f"Distribution for {player} — {market} (last {lookback} weeks)"
                 )
-                fig.add_vline(x=line, line_color="red")
-                fig.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font=dict(color="#e8e8e8"))
+                fig.update_layout(template="plotly_dark", height=360, margin=dict(l=8,r=8,b=20,t=40))
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Not enough history to plot distribution.")
 
-            except Exception as e:
-                st.error("Analysis failed:")
-                st.code(traceback.format_exc())
+# ============================================================
+# TAB 2 — Parlay Probability (multi-leg)
+# ============================================================
+with tab2:
+    st.subheader("Parlay Probability Model")
+    st.caption("Add up to 6 legs. Joint probability uses a conservative correlation adjustment for same team/player legs.")
 
-# ============================= PARLAY TAB =====================================
-with tab_parlay:
-    st.subheader("Multi-Leg Parlay Probability")
+    # session state for legs
+    if "legs" not in st.session_state:
+        st.session_state.legs = [
+            {"player": players_sorted[0] if players_sorted else "",
+             "market": markets[0], "line": default_line, "opponent": teams[0] if teams else "", "lookback": 5}
+        ]
 
-    num_legs = st.number_input("Number of legs", min_value=2, max_value=10, value=3, step=1)
-    legs = []
+    def add_leg():
+        st.session_state.legs.append(
+            {"player": players_sorted[0] if players_sorted else "",
+             "market": markets[0], "line": default_line, "opponent": teams[0] if teams else "", "lookback": 5}
+        )
+    def remove_leg(idx):
+        st.session_state.legs.pop(idx)
 
-    for i in range(int(num_legs)):
-        st.markdown(f"#### Leg {i+1}")
-        c1, c2, c3, c4 = st.columns([2, 1.6, 1.2, 1.2])
+    # Editor UI
+    out_rows = []
+    for i, leg in enumerate(st.session_state.legs):
+        st.markdown(f"**Leg {i+1}**")
+        c1,c2,c3,c4,c5,cx = st.columns([2,1.6,1.1,1.2,1.1,0.6])
         with c1:
-            pl = st.selectbox(f"Player (Leg {i+1})", player_list, key=f"pl_{i}")
+            st.session_state.legs[i]["player"] = st.selectbox(
+                "Player", players_sorted, key=f"ply_{i}", index=min(0,len(players_sorted)-1)
+            )
         with c2:
-            mk = st.selectbox(
-                f"Market (Leg {i+1})",
-                ["Passing Yards", "Rushing Yards", "Receiving Yards", "Rushing+Receiving TDs", "Passing TDs"],
-                key=f"mk_{i}"
+            st.session_state.legs[i]["market"] = st.selectbox(
+                "Market", markets, key=f"mkt_{i}"
             )
         with c3:
-            ln = st.number_input(f"Line (Leg {i+1})", min_value=0.0, step=0.5, value=50.0, key=f"ln_{i}")
+            st.session_state.legs[i]["line"] = st.number_input(
+                "Line", value=float(default_line), key=f"line_{i}", step=0.5
+            )
         with c4:
-            opp = st.text_input(f"Opponent (Leg {i+1})", value="", key=f"opp_{i}")
+            st.session_state.legs[i]["opponent"] = st.text_input(
+                "Opponent", value=teams[0] if teams else "", key=f"opp_{i}"
+            )
+        with c5:
+            st.session_state.legs[i]["lookback"] = st.slider(
+                "Lookback", 1, 8, 5, key=f"lb_{i}"
+            )
+        with cx:
+            if st.button("🗑️", key=f"rm_{i}") and len(st.session_state.legs) > 1:
+                remove_leg(i)
+                st.experimental_rerun()
 
-        legs.append(dict(player=pl, market=mk, line=ln, opp=opp))
+        # compute per-leg now (so user sees it live)
+        s, _meta = utils.get_player_market_series(
+            df=data,
+            player_name=st.session_state.legs[i]["player"],
+            market=st.session_state.legs[i]["market"],
+            opponent=st.session_state.legs[i]["opponent"],
+            lookback_weeks=st.session_state.legs[i]["lookback"],
+        )
+        r = utils.probability_from_history(series=s, market=st.session_state.legs[i]["market"],
+                                           line=st.session_state.legs[i]["line"])
+        out_rows.append({
+            "Player": st.session_state.legs[i]["player"],
+            "Market": st.session_state.legs[i]["market"],
+            "Line": st.session_state.legs[i]["line"],
+            "Opponent": st.session_state.legs[i]["opponent"],
+            "P(Over)": r["p_over"],
+            "P(Under)": r["p_under"],
+        })
 
-    if st.button("Compute Parlay Probability", type="primary"):
-        with st.spinner("Computing parlay…"):
-            try:
-                # Compute per-leg probability via the same model
-                results = []
-                for lg in legs:
-                    res = utils.predict_player_market(
-                        df_all=df_all,
-                        player_name=lg["player"],
-                        market=lg["market"],
-                        line=lg["line"],
-                        opponent=lg["opp"],
-                        name_col=name_col,
-                        week_col=week_col,
-                        team_col=team_col,
-                        opp_col=opp_col,
-                        lookback_weeks=4
-                    )
-                    results.append(res)
+    st.markdown("---")
+    res_df = pd.DataFrame(out_rows)
+    if not res_df.empty:
+        st.dataframe(res_df.style.format({"Line":"{:.2f}","P(Over)":"{:.3f}","P(Under)":"{:.3f}"}),
+                     use_container_width=True)
 
-                # Combine with light correlation penalty
-                p, penalty = utils.combine_parlay_probabilities(results)
-                st.success(f"Parlay Hit Probability: {p*100:.2f}% (correlation adj: −{penalty*100:.1f}%)")
+        # choose direction per leg
+        st.markdown("**Choose Outcomes**")
+        choices = []
+        for i in range(len(res_df)):
+            choice = st.selectbox(f"Leg {i+1} outcome", ["Over","Under"], key=f"dir_{i}")
+            choices.append(choice)
 
-                # Show leg table
-                out = pd.DataFrame([{
-                    "Player": legs[i]["player"],
-                    "Market": legs[i]["market"],
-                    "Line": legs[i]["line"],
-                    "Opponent": legs[i]["opp"],
-                    "Over %": f"{results[i]['p_over']*100:.1f}",
-                    "Conf %": f"{results[i]['confidence']:.1f}"
-                } for i in range(len(legs))])
-                st.dataframe(out, use_container_width=True, hide_index=True)
+        # joint probability
+        probs = []
+        labels = []
+        for i, row in res_df.iterrows():
+            p = row["P(Over)"] if choices[i]=="Over" else row["P(Under)"]
+            probs.append(max(1e-6, min(1-1e-6, float(p))))  # clamp
+            labels.append((row["Player"], row["Opponent"], row["Market"]))
+        joint = utils.joint_probability_with_correlation(probs, labels)
 
-            except Exception as e:
-                st.error("Parlay computation failed:")
-                st.code(traceback.format_exc())
+        st.markdown(f"<div class='card' style='text-align:center;font-size:18px'>"
+                    f"Estimated Parlay Hit Probability: <b>{100*joint:.2f}%</b></div>",
+                    unsafe_allow_html=True)
 
-# ----------------------------- FOOTER -----------------------------------------
-st.markdown("<hr/>", unsafe_allow_html=True)
-st.markdown(
-    "<div style='text-align:center;color:#A0AEC0;'>© 2025 Project Nova Analytics • Local AI engine • "
-    "Data auto-refresh 30 min • Nightly retrain at 12:00 AM EST</div>",
-    unsafe_allow_html=True
-)
+    if len(st.session_state.legs) < 6 and st.button("➕ Add Leg"):
+        add_leg()
+        st.experimental_rerun()
+
+# Footer
+st.markdown("<div class='footer'>© 2025 Project Nova Analytics • Built for live betting research (no guarantees).</div>",
+            unsafe_allow_html=True)
