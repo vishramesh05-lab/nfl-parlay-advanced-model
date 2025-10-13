@@ -1,18 +1,47 @@
-# -*- coding: utf-8 -*-
-# NFL Parleggy AI Model — Live JSON ➜ Features ➜ Probabilities (+ Parlay)
-# Author: Project Nova Analytics (Vish)
-
+# --- imports (unchanged) ---
 import os, time, math, json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-# ==== Safe refresh & cache (Streamlit 1.37-safe) ====
-import streamlit as st
-from packaging import version
 
-# Show running version (useful in the header while we debug)
+import utils  # your helper module
+
+# === PAGE CONFIG (must be the FIRST Streamlit call) ===
+st.set_page_config(
+    page_title="NFL Parleggy AI Model",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# (Now it's safe to use any other st.* calls)
+st.caption(f"Streamlit {st.__version__}")
+
+# === Safe refresh & cache (no experimental APIs) ===
+def _clear_caches():
+    try: st.cache_data.clear()
+    except Exception: pass
+    try: st.cache_resource.clear()
+    except Exception: pass
+
+_clear_caches()
+
+REFRESH_MS = 30 * 60 * 1000  # 30 minutes
+st.markdown(
+    f"""
+    <script>
+      setTimeout(function(){{
+        if (document.visibilityState === 'visible') {{
+          window.location.reload();
+        }}
+      }}, {REFRESH_MS});
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
+# === Your styles, headers, tabs, etc. come AFTER this ===
 st.caption(f"Streamlit {st.__version__}")
 
 def clear_caches_safely():
