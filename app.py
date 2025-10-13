@@ -53,25 +53,47 @@ OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appi
 @st.cache_data(ttl=3600)
 def fetch_kaggle_data():
     """
-    Fetches and loads the NFL Big Data Bowl 2025 dataset via Kaggle API.
+    Fetches NFL Big Data Bowl 2025 dataset using Kaggle's Python API (not CLI).
+    Compatible with Streamlit Cloud.
     """
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
     dataset = "nfl-big-data-bowl-2025"
     csv_path = "player_weekly_stats.csv"
 
     try:
-        if not os.path.exists(csv_path):
-            st.info("📦 Downloading NFL 2025 data from Kaggle … please wait ⏳")
-            subprocess.run(["kaggle", "competitions", "download", "-c", dataset, "-p", "."], check=True)
-            subprocess.run(["unzip", "-o", "*.zip"], check=False)
-    except Exception as e:
-        raise RuntimeError(f"Kaggle data download failed: {e}")
+        api = KaggleApi()
+        api.authenticate()  # Uses Streamlit secrets for authentication
 
-    try:
-        df = pd.read_csv(csv_path)
-        st.success("✅ NFL 2025 data loaded successfully.")
-        return df
+        # Download dataset zip if not already there
+        if not os.path.exists("data.zip"):
+            st.info("📦 Downloading NFL 2025 dataset from Kaggle ... please wait ⏳")
+            api.competition_download_files(dataset, path=".", quiet=False)
+        else:
+            st.info("✅ Using cached Kaggle zip file.")
+
+        # Unzip contents
+        os.system("unzip -o '*.zip' > /dev/null 2>&1")
+
     except Exception as e:
-        raise RuntimeError(f"Error loading CSV file: {e}")
+        raise RuntimeError(f"Kaggle API error: {e}")
+
+    # Try reading likely file names
+    try:
+        possible_files = [
+            "player_weekly_stats.csv",
+            "player_stats.csv",
+            "players.csv",
+            "week_stats.csv"
+        ]
+        for f in possible_files:
+            if os.path.exists(f):
+                df = pd.read_csv(f)
+                st.success(f"✅ Loaded {f} successfully.")
+                return df
+        raise FileNotFoundError("Expected data file not found after Kaggle extraction.")
+    except Exception as e:
+        raise RuntimeError(f"Error reading CSV: {e}")
 
 # ---------------------------------------------------------------
 def fetch_weather(city):
