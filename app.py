@@ -10,7 +10,7 @@ import os, pickle, time, requests
 from datetime import datetime
 from scipy.stats import norm
 import plotly.express as px
-import utils # helper functions
+from data import utils  # helper functions
 
 # ----------------- PAGE CONFIG -----------------
 st.set_page_config(page_title="NFL Parleggy Model v70-AI",
