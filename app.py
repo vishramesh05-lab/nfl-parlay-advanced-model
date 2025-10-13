@@ -1,7 +1,9 @@
 # NFL Parlay Helper (Dual Probabilities, 2025) — vA46
 # Live Kaggle (NFL Big Data Bowl 2025) + Over/Under probability model
 # Author: Vishvin Ramesh | 2025
-
+from kaggle.api.kaggle_api_extended import KaggleApi
+import os
+import streamlit as st
 import streamlit as st
 import pandas as pd
 import numpy as np
