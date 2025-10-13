@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+from pathlib import Path
 import os
 import json
 import pandas as pd
@@ -166,3 +168,19 @@ def load_cached_df():
 def should_refresh(last_refresh_time, interval_minutes=30):
     """Check if 30 minutes have passed since last refresh."""
     return (datetime.utcnow() - last_refresh_time).total_seconds() > (interval_minutes * 60)
+    # --- Retrain timestamp helpers ---
+# Where we store the last retrain timestamp. You can override with env var LAST_RETRAIN_PATH
+LAST_RETRAIN_PATH = Path(os.getenv("LAST_RETRAIN_PATH", "data/.last_retrain"))
+
+def record_last_retrain_time(ts: datetime | None = None) -> None:
+    """Write the last retrain UTC time to disk."""
+    LAST_RETRAIN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    when = ts or datetime.now(timezone.utc)
+    LAST_RETRAIN_PATH.write_text(when.strftime("%Y-%m-%d %H:%M:%S UTC"))
+
+def get_last_retrain_time() -> str:
+    """Return the last retrain time as a human-readable string, or 'never' if unknown."""
+    try:
+        return LAST_RETRAIN_PATH.read_text().strip()
+    except FileNotFoundError:
+        return "never"
