@@ -1,6 +1,6 @@
 # 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
 # Data: Kaggle Big Data Bowl 2025 + Optional OpenWeather Adjustments
-# Build vA53 | Vishvin Ramesh
+# Build vA54 | Vishvin Ramesh
 
 import streamlit as st
 import pandas as pd
@@ -20,7 +20,7 @@ st.set_page_config(
 )
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025 - Kaggle Edition)</h1>", unsafe_allow_html=True)
 st.caption("Data: Kaggle Big Data Bowl 2025 (Weekly Updates) + OpenWeather Adjustments")
-st.caption("Build vA53 | by Vishvin Ramesh")
+st.caption("Build vA54 | by Vishvin Ramesh")
 
 # ----------------------------------------------------
 # SIDEBAR FILTERS
@@ -42,36 +42,50 @@ weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 # CONSTANTS
 # ----------------------------------------------------
 DATA_FILE = "nfl_2025_player_stats.csv"
-OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")  # Add in Streamlit Secrets if available
+OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")  # Add to Streamlit Secrets if available
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
 # ----------------------------------------------------
 # FUNCTIONS
 # ----------------------------------------------------
-def detect_encoding(file_path):
-    """Detects encoding for robust CSV reading."""
-    with open(file_path, "rb") as f:
-        raw_data = f.read(2048)
-        result = chardet.detect(raw_data)
-        return result["encoding"]
+def safe_read_csv(file_like):
+    """
+    Universal CSV reader that auto-detects and gracefully handles encoding.
+    Works with UTF-8, Latin1, UTF-16, and Windows-1252.
+    """
+    try:
+        # Try UTF-8 first
+        return pd.read_csv(file_like, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            # Try Latin-1 (Windows default)
+            return pd.read_csv(file_like, encoding="latin1")
+        except UnicodeDecodeError:
+            # Detect best guess with chardet
+            file_like.seek(0)
+            raw_data = file_like.read(4096)
+            encoding_guess = chardet.detect(raw_data).get("encoding", "utf-8")
+            file_like.seek(0)
+            try:
+                return pd.read_csv(file_like, encoding=encoding_guess, errors="replace")
+            except Exception:
+                # Last resort binary decode
+                file_like.seek(0)
+                return pd.read_csv(file_like, encoding="utf-8", errors="replace")
 
 @st.cache_data(ttl=3600)
 def load_data(uploaded_file=None):
-    """Load Kaggle data either from upload or repo, auto-detect encoding."""
+    """Load Kaggle data either from upload or local file."""
     try:
         if uploaded_file is not None:
-            raw_bytes = uploaded_file.read()
-            detected = chardet.detect(raw_bytes)
-            encoding_used = detected["encoding"] or "utf-8"
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, encoding=encoding_used)
+            df = safe_read_csv(uploaded_file)
         else:
-            encoding_used = detect_encoding(DATA_FILE)
-            df = pd.read_csv(DATA_FILE, encoding=encoding_used)
+            with open(DATA_FILE, "rb") as f:
+                df = safe_read_csv(f)
         df.columns = [c.lower().strip() for c in df.columns]
         return df
     except FileNotFoundError:
-        st.error("⚠️ Could not find the dataset file. Please upload the CSV below.")
+        st.error("⚠️ Dataset not found. Please upload the CSV below.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Error loading data: {e}")
@@ -100,11 +114,11 @@ def calc_prob(series, line, direction):
 # ----------------------------------------------------
 # DATA UPLOAD / RELOAD
 # ----------------------------------------------------
-uploaded_file = st.file_uploader("📂 Upload new Kaggle 2025 CSV (optional)", type=["csv"])
+uploaded_file = st.file_uploader("📂 Upload Kaggle 2025 CSV (optional)", type=["csv"])
 
 if st.button("🔁 Reload / Refresh Data", use_container_width=True):
     st.cache_data.clear()
-    st.success("✅ Cache cleared. New data will reload automatically!")
+    st.success("✅ Cache cleared. Data will reload automatically.")
 
 # ----------------------------------------------------
 # MAIN ANALYSIS
@@ -114,13 +128,13 @@ if st.button("Analyze Player", use_container_width=True):
     if df.empty:
         st.stop()
 
-    # Match player by name fragment
+    # Match player name
     matches = df[df["player"].str.contains(player_name, case=False, na=False)]
     if matches.empty:
-        st.warning(f"No data found for '{player_name}'. Try partial name (e.g. 'Mahomes').")
+        st.warning(f"No data found for '{player_name}'. Try partial name (e.g., 'Mahomes').")
         st.stop()
 
-    # Map stat type to column
+    # Map stat type
     stat_col_map = {
         "Passing Yards": "passing_yards",
         "Rushing Yards": "rushing_yards",
@@ -131,11 +145,11 @@ if st.button("Analyze Player", use_container_width=True):
         st.error(f"Column '{stat_col}' not found in dataset.")
         st.stop()
 
-    # Subset player’s last N weeks
+    # Subset player’s recent weeks
     player_df = matches[["week", stat_col]].sort_values("week").tail(lookback_weeks)
     player_df.rename(columns={stat_col: "value"}, inplace=True)
 
-    # Plot trend
+    # Chart
     fig = px.bar(
         player_df, x="week", y="value", text="value",
         title=f"{player_name} — {stat_type} (Last {lookback_weeks} weeks)"
@@ -143,7 +157,7 @@ if st.button("Analyze Player", use_container_width=True):
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Probabilities
+    # Probability metrics
     st.subheader("🎯 Probability Model")
     over_prob = calc_prob(player_df["value"], sportsbook_line, "Over")
     under_prob = calc_prob(player_df["value"], sportsbook_line, "Under")
@@ -152,7 +166,7 @@ if st.button("Analyze Player", use_container_width=True):
     col1.success(f"Over Probability: {over_prob}%")
     col2.warning(f"Under Probability: {under_prob}%")
 
-    # Weather adjustment
+    # Weather
     weather, temp = fetch_weather(weather_city)
     adj = over_prob
     if weather and "rain" in weather.lower():
@@ -165,4 +179,4 @@ if st.button("Analyze Player", use_container_width=True):
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
-st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA53 | by Vishvin Ramesh")
+st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA54 | by Vishvin Ramesh")
