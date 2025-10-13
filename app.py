@@ -37,10 +37,13 @@ OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appi
 
 NFLFASTR_URL = "https://raw.githubusercontent.com/nflverse/nflverse-data/master/data/player_stats.csv.gz"
 
+NFLFASTR_URL = "https://raw.githubusercontent.com/nflverse/nflverse-data/main/data/player_stats.csv.gz"
+
 @st.cache_data(ttl=3600)
 def load_nflfastR():
-    """Load current NFL player stats from nflverse GitHub mirror (works globally)."""
+    """Load the latest NFLverse player stats (free public data, 2025)."""
     df = pd.read_csv(NFLFASTR_URL, compression="gzip")
+    # Keep latest season
     max_season = df["season"].max()
     df = df[df["season"] == max_season]
     return df
