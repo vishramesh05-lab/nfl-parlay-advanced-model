@@ -41,8 +41,6 @@ st.caption("Live JSON ➜ Feature Engine ➜ XGBoost ➜ Probability • Auto-re
 
 # ----------------------------- AUTO REFRESH / NIGHTLY RETRAIN -----------------
 # Auto-refresh UI every 30 minutes to pick up new /data files
-st_autoref = st.runtime.legacy_caching.hashing._CodeHasher  # silence IDE warnings
-st_autorefresh = st.experimental_rerun  # alias for clarity (we will use rerun only when needed)
 
 REFRESH_SEC = 30 * 60
 now_ts = time.time()
