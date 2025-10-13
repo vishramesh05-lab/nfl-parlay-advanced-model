@@ -1,5 +1,7 @@
 # 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
-# Build vA58 | Vishvin Ramesh — Full Encoding & Fallback Fix
+# Build vA59 | Vishvin Ramesh
+# Supports: Kaggle Big Data Bowl 2025, FootballDB, or manual upload
+# Formats: CSV, ZIP, JSON, Parquet (any encoding)
 
 import streamlit as st
 import pandas as pd
@@ -11,10 +13,14 @@ from datetime import datetime
 # ----------------------------------------------------
 # PAGE CONFIG
 # ----------------------------------------------------
-st.set_page_config(page_title="NFL Parlay Helper (2025 - Kaggle Edition)", page_icon="🏈", layout="wide")
+st.set_page_config(
+    page_title="NFL Parlay Helper (2025 - Kaggle Edition)",
+    layout="wide",
+    page_icon="🏈"
+)
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025 - Kaggle Edition)</h1>", unsafe_allow_html=True)
-st.caption("Data: Kaggle Big Data Bowl 2025 (Weekly or Custom CSV) + OpenWeather Adjustments")
-st.caption("Build vA58 | by Vishvin Ramesh")
+st.caption("Data: Kaggle Big Data Bowl 2025 + FootballDB + OpenWeather adjustments")
+st.caption("Build vA59 | by Vishvin Ramesh")
 
 # ----------------------------------------------------
 # SIDEBAR FILTERS
@@ -24,7 +30,7 @@ current_week = st.sidebar.slider("Current Week", 1, 18, 6)
 lookback_weeks = st.sidebar.slider("Lookback (weeks)", 1, 8, 5)
 
 # ----------------------------------------------------
-# INPUT FIELDS
+# INPUTS
 # ----------------------------------------------------
 player_name = st.text_input("Player Name", placeholder="e.g. Patrick Mahomes")
 stat_type = st.selectbox("Stat Type", ["Passing Yards", "Rushing Yards", "Receiving Yards"])
@@ -32,53 +38,77 @@ sportsbook_line = st.number_input("Sportsbook Line", step=0.5, format="%.1f", va
 opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)")
 weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 
+# ----------------------------------------------------
+# CONSTANTS
+# ----------------------------------------------------
 DATA_FILE = "nfl_2025_player_stats.csv"
 OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
 # ----------------------------------------------------
-# UNIVERSAL FILE READER (DEEP ENCODING FIX)
+# UNIVERSAL FILE LOADER
 # ----------------------------------------------------
 def deep_read_csv(file_like):
-    """Deep encoding detector for CSV or ZIP -> CSV"""
+    """Reads CSV, JSON, or Parquet (including inside ZIP) with automatic encoding detection."""
     try:
-        # Check ZIP container
         if zipfile.is_zipfile(file_like):
             with zipfile.ZipFile(file_like, "r") as z:
-                csvs = [n for n in z.namelist() if n.endswith(".csv")]
-                if not csvs:
-                    st.error("⚠️ ZIP found but no CSV inside.")
+                candidates = [n for n in z.namelist() if n.endswith((".csv", ".json", ".parquet"))]
+                if not candidates:
+                    st.warning("⚠️ ZIP found but no CSV/Parquet/JSON inside.")
                     return pd.DataFrame()
-                csv_name = csvs[0]
-                st.info(f"📦 Extracting {csv_name} from ZIP…")
-                with z.open(csv_name) as f:
+
+                file_name = candidates[0]
+                st.info(f"📦 Extracting {file_name} from ZIP…")
+                with z.open(file_name) as f:
                     raw = f.read()
-                    enc = chardet.detect(raw).get("encoding", "utf-8")
-                    for candidate in [enc, "utf-8-sig", "latin1", "cp1252"]:
+
+                    # --- CSV ---
+                    if file_name.endswith(".csv"):
+                        enc = chardet.detect(raw).get("encoding", "utf-8")
+                        for e in [enc, "utf-8-sig", "latin1", "cp1252"]:
+                            try:
+                                return pd.read_csv(io.BytesIO(raw), encoding=e)
+                            except Exception:
+                                continue
+                        st.error("❌ Could not decode CSV file.")
+                        return pd.DataFrame()
+
+                    # --- JSON ---
+                    elif file_name.endswith(".json"):
                         try:
-                            f2 = io.BytesIO(raw)
-                            return pd.read_csv(f2, encoding=candidate)
-                        except Exception:
-                            continue
-                    st.error("❌ Could not decode ZIP CSV with any encoding.")
-                    return pd.DataFrame()
-        # If normal CSV
+                            return pd.read_json(io.BytesIO(raw))
+                        except Exception as e:
+                            st.error(f"❌ Failed to read JSON: {e}")
+                            return pd.DataFrame()
+
+                    # --- Parquet ---
+                    elif file_name.endswith(".parquet"):
+                        try:
+                            import pyarrow.parquet as pq
+                            table = pq.read_table(io.BytesIO(raw))
+                            return table.to_pandas()
+                        except Exception as e:
+                            st.error(f"❌ Failed to read Parquet: {e}")
+                            return pd.DataFrame()
+
+        # If not a ZIP, try normal read
         raw = file_like.read()
         enc = chardet.detect(raw).get("encoding", "utf-8")
-        for candidate in [enc, "utf-8-sig", "latin1", "cp1252"]:
+        for e in [enc, "utf-8-sig", "latin1", "cp1252"]:
             try:
-                f2 = io.BytesIO(raw)
-                return pd.read_csv(f2, encoding=candidate)
+                return pd.read_csv(io.BytesIO(raw), encoding=e)
             except Exception:
                 continue
         st.error("❌ Could not decode CSV with any fallback encoding.")
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Error reading CSV: {e}")
+        st.error(f"❌ Error reading file: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_data(uploaded_file=None):
+    """Loads dataset from uploaded or default file."""
     try:
         if uploaded_file:
             df = deep_read_csv(uploaded_file)
@@ -95,7 +125,7 @@ def load_data(uploaded_file=None):
         return pd.DataFrame()
 
 # ----------------------------------------------------
-# WEATHER
+# WEATHER FUNCTION
 # ----------------------------------------------------
 def fetch_weather(city):
     if not city:
@@ -110,7 +140,7 @@ def fetch_weather(city):
     return None, None
 
 # ----------------------------------------------------
-# PROBABILITY
+# PROBABILITY CALCULATOR
 # ----------------------------------------------------
 def calc_prob(series, line, direction):
     if len(series) == 0:
@@ -119,12 +149,12 @@ def calc_prob(series, line, direction):
     return round(100 * hits / len(series), 1)
 
 # ----------------------------------------------------
-# UPLOAD & RELOAD
+# UPLOAD SECTION
 # ----------------------------------------------------
-uploaded_file = st.file_uploader("📂 Upload Kaggle 2025 CSV or ZIP file", type=["csv", "zip"])
+uploaded_file = st.file_uploader("📂 Upload Kaggle 2025 CSV, ZIP, JSON, or Parquet", type=["csv", "zip", "json", "parquet"])
 if st.button("🔁 Reload / Refresh Data", use_container_width=True):
     st.cache_data.clear()
-    st.success("✅ Cache cleared and ready!")
+    st.success("✅ Cache cleared. Ready for fresh data!")
 
 # ----------------------------------------------------
 # DATA PREVIEW
@@ -146,31 +176,41 @@ if st.button("Analyze Player", use_container_width=True):
         st.warning("Please upload a dataset first.")
         st.stop()
 
-    if "player" not in df.columns:
-        st.error("❌ No 'player' column found in dataset.")
+    # Smart column detection
+    df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+    player_col = next((c for c in df.columns if "player" in c or "name" in c), None)
+    week_col = next((c for c in df.columns if "week" in c), None)
+    passing_col = next((c for c in df.columns if "pass" in c and "yard" in c), None)
+    rushing_col = next((c for c in df.columns if "rush" in c and "yard" in c), None)
+    receiving_col = next((c for c in df.columns if "rec" in c and "yard" in c), None)
+
+    if not player_col:
+        st.error("❌ No player column detected.")
         st.stop()
 
-    matches = df[df["player"].str.contains(player_name, case=False, na=False)]
+    matches = df[df[player_col].str.contains(player_name, case=False, na=False)]
     if matches.empty:
         st.warning(f"No data found for '{player_name}'. Try partial name.")
         st.stop()
 
-    # Column map
+    # Pick stat column
     stat_map = {
-        "Passing Yards": "passing_yards",
-        "Rushing Yards": "rushing_yards",
-        "Receiving Yards": "receiving_yards"
+        "Passing Yards": passing_col,
+        "Rushing Yards": rushing_col,
+        "Receiving Yards": receiving_col
     }
     stat_col = stat_map[stat_type]
-    if stat_col not in df.columns:
-        st.error(f"Column '{stat_col}' not found in dataset.")
+    if not stat_col:
+        st.error(f"❌ Could not detect column for {stat_type}.")
         st.stop()
 
-    player_df = matches[["week", stat_col]].sort_values("week").tail(lookback_weeks)
+    # Prepare player subset
+    week_col = week_col or "week"
+    player_df = matches[[week_col, stat_col]].sort_values(week_col).tail(lookback_weeks)
     player_df.rename(columns={stat_col: "value"}, inplace=True)
 
     # Plot
-    fig = px.bar(player_df, x="week", y="value", text="value",
+    fig = px.bar(player_df, x=week_col, y="value", text="value",
                  title=f"{player_name} — {stat_type} (Last {lookback_weeks} Weeks)")
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
@@ -197,4 +237,4 @@ if st.button("Analyze Player", use_container_width=True):
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
-st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA58 | Vishvin Ramesh")
+st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA59 | Vishvin Ramesh")
