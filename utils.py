@@ -1,4 +1,4 @@
-import os, json, time, random, pickle
+import os, json, time, pickle, random
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -15,6 +15,7 @@ os.makedirs(DATA_PATH, exist_ok=True)
 
 MODEL_FILE = os.path.join(DATA_PATH, "ai_model.pkl")
 LAST_RETRAIN_FILE = os.path.join(DATA_PATH, "last_retrain.txt")
+TRAIN_LOG_FILE = os.path.join(DATA_PATH, "training_log.csv")
 
 # -----------------------------
 # LOAD + MERGE JSON
@@ -47,13 +48,12 @@ def retrain_ai():
         print("⚠️ No data available to train AI model.")
         return False
 
-    # Identify numeric columns and targets
     numeric_cols = df.select_dtypes(include=["number"]).columns
     if len(numeric_cols) < 3:
         print("⚠️ Not enough numeric features.")
         return False
 
-    # Use average of all numeric fields as target approximation
+    # Pick a numeric target dynamically
     target_col = numeric_cols[-1]
     X = df[numeric_cols[:-1]]
     y = df[target_col]
@@ -66,12 +66,13 @@ def retrain_ai():
         max_depth=6,
         subsample=0.9,
         colsample_bytree=0.9,
-        random_state=42
+        random_state=42,
+        n_jobs=2
     )
     model.fit(X_train, y_train)
 
     mae = mean_absolute_error(y_test, model.predict(X_test))
-    print(f"✅ Model retrained | MAE: {mae:.2f}")
+    print(f"✅ Model retrained | MAE: {mae:.3f}")
 
     with open(MODEL_FILE, "wb") as f:
         pickle.dump(model, f)
@@ -79,15 +80,25 @@ def retrain_ai():
     with open(LAST_RETRAIN_FILE, "w") as f:
         f.write(datetime.utcnow().isoformat())
 
-    return True
+    # Log training results
+    log_entry = pd.DataFrame([{
+        "timestamp": datetime.utcnow().isoformat(),
+        "mae": mae,
+        "records": len(df)
+    }])
+    if os.path.exists(TRAIN_LOG_FILE):
+        old = pd.read_csv(TRAIN_LOG_FILE)
+        pd.concat([old, log_entry], ignore_index=True).to_csv(TRAIN_LOG_FILE, index=False)
+    else:
+        log_entry.to_csv(TRAIN_LOG_FILE, index=False)
 
+    return True
 
 def get_last_retrain_time():
     if os.path.exists(LAST_RETRAIN_FILE):
         with open(LAST_RETRAIN_FILE) as f:
             return datetime.fromisoformat(f.read().strip()).strftime("%b %d %Y %H:%M UTC")
     return "Never"
-
 
 def maybe_retrain():
     """Retrains every 30 min or nightly at 12 AM EST."""
@@ -96,12 +107,12 @@ def maybe_retrain():
         retrain_ai(); return True
     with open(LAST_RETRAIN_FILE) as f:
         last = datetime.fromisoformat(f.read().strip())
-    if (now - last) > timedelta(minutes=30) or now.hour == 4:  # 4 UTC ≈ 12 AM EST
+    if (now - last) > timedelta(minutes=30) or now.hour == 4:
         retrain_ai(); return True
     return False
 
 # -----------------------------
-# PREDICTION HELPERS
+# MODEL LOADING + PREDICTION
 # -----------------------------
 def load_model():
     if not os.path.exists(MODEL_FILE):
@@ -110,7 +121,7 @@ def load_model():
         return pickle.load(f)
 
 def ai_predict(line):
-    """Predict adjusted performance value using the trained model."""
+    """Predict adjusted performance value using trained AI model."""
     model = load_model()
     random_input = np.random.rand(model.n_features_in_).reshape(1, -1)
     pred = model.predict(random_input)[0]
@@ -121,7 +132,7 @@ def ai_predict(line):
     return avg, max(0, min(100, over)), max(0, min(100, under))
 
 # -----------------------------
-# PLAYER UTILS
+# PLAYER + PARLAY HELPERS
 # -----------------------------
 def get_player_dropdown():
     return [
@@ -141,9 +152,6 @@ def fetch_player_data(player, stat_type):
     except Exception:
         return None
 
-# -----------------------------
-# PROBABILITY CALCULATIONS
-# -----------------------------
 def calculate_probabilities(df, line):
     try:
         avg = df.select_dtypes(include=["number"]).mean().mean()
@@ -163,5 +171,14 @@ def simulate_fallback(line):
 
 def calculate_parlay_probability(probs):
     combined = 1.0
-    for p in probs: combined *= p
+    for p in probs:
+        combined *= p
     return combined
+
+# -----------------------------
+# TRAINING VISUALIZATION DATA
+# -----------------------------
+def get_training_log():
+    if not os.path.exists(TRAIN_LOG_FILE):
+        return pd.DataFrame(columns=["timestamp", "mae", "records"])
+    return pd.read_csv(TRAIN_LOG_FILE)
