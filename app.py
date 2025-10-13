@@ -248,7 +248,7 @@ with tab2:
         with cx:
             if st.button("🗑️", key=f"rm_{i}") and len(st.session_state.legs) > 1:
                 remove_leg(i)
-                st.experimental_rerun()
+                st.rerun()
 
         # compute per-leg now (so user sees it live)
         s, _meta = utils.get_player_market_series(
@@ -297,7 +297,7 @@ with tab2:
 
     if len(st.session_state.legs) < 6 and st.button("➕ Add Leg"):
         add_leg()
-        st.experimental_rerun()
+        st.rerun()
 
 # Footer
 st.markdown("<div class='footer'>© 2025 Project Nova Analytics • Built for live betting research (no guarantees).</div>",
