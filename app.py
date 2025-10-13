@@ -10,6 +10,8 @@ import os, pickle, time, requests
 from datetime import datetime
 from scipy.stats import norm
 import plotly.express as px
+import sys, os
+sys.path.append(os.path.dirname(__file__))
 import utils  # helper functions
 
 # ----------------- PAGE CONFIG -----------------
