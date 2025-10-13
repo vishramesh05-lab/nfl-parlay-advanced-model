@@ -1,5 +1,5 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA30
-# Free ESPN API + OpenWeather integration
+# NFL Parlay Helper (Dual Probabilities, 2025) — vA31
+# Free open-source NFL FastR data + OpenWeather
 # Author: Vish (2025)
 
 import streamlit as st
@@ -7,21 +7,16 @@ import pandas as pd
 import requests
 import plotly.express as px
 import re
-from difflib import get_close_matches
 
-# -------------------------------------------------------------------------
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
                    layout="wide", page_icon="🏈")
 
-st.markdown(
-    "<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
-    unsafe_allow_html=True
-)
-st.caption("Live data + probability model — ESPN + OpenWeather (Free Data Source)")
-st.caption("Build vA30 | by Vish")
+st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
+            unsafe_allow_html=True)
+st.caption("Live data + probability model — NFLfastR (free) + OpenWeather")
+st.caption("Build vA31 | by Vish")
 
-# -------------------------------------------------------------------------
-# Sidebar Filters
+# Sidebar
 st.sidebar.header("⚙️ Filters")
 current_week = st.sidebar.slider("Current week", 1, 18, 6)
 lookback_weeks = st.sidebar.slider("Lookback (weeks)", 1, 8, 5)
@@ -34,65 +29,27 @@ sportsbook_line = st.number_input("Sportsbook Line", step=0.5)
 opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)", "")
 weather_city = st.text_input("Weather City (optional, e.g., Detroit)", "")
 
-# -------------------------------------------------------------------------
-# ESPN + OpenWeather URLs
-ESPN_SEARCH_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes"
-ESPN_PLAYER_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/athletes/{pid}/statistics"
-OPENWEATHER_KEY = "demo"  # replace with real key if desired
+# --------------------------------------------------------------------
+# URLs
+NFLFASTR_URL = "https://raw.githubusercontent.com/nflverse/nflfastR-data/master/data/player_stats.csv.gz"
+OPENWEATHER_KEY = "demo"
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
-# -------------------------------------------------------------------------
-def _norm(s): return re.sub(r"[^a-z]", "", (s or "").lower())
-
 @st.cache_data(ttl=3600)
-def search_player_espm(name):
-    """Search player by name via ESPN free JSON index."""
-    q = _norm(name)
-    resp = requests.get(ESPN_SEARCH_URL, timeout=20)
-    if resp.status_code != 200:
-        return None
-    data = resp.json().get("items", [])
-    for p in data:
-        nm = _norm(p.get("displayName", ""))
-        if q in nm:
-            return p
-    # fuzzy fallback
-    names = [p.get("displayName", "") for p in data]
-    best = get_close_matches(name, names, n=1, cutoff=0.75)
-    if best:
-        for p in data:
-            if p.get("displayName") == best[0]:
-                return p
-    return None
-
-def fetch_player_stats(pid):
-    """Pull player stat history from ESPN (includes 2025)."""
-    url = ESPN_PLAYER_URL.format(pid=pid)
-    r = requests.get(url, timeout=25)
-    if r.status_code != 200:
-        return None
-    j = r.json()
-    splits = j.get("splits", [])
-    weekly = []
-    for s in splits:
-        if "statSource" in s and "week" in s:
-            wk = s.get("week")
-            stats = s.get("stats", {})
-            weekly.append({
-                "week": wk,
-                "passing_yards": float(stats.get("passingYards", 0)),
-                "rushing_yards": float(stats.get("rushingYards", 0)),
-                "receiving_yards": float(stats.get("receivingYards", 0))
-            })
-    return pd.DataFrame(weekly)
+def load_nflfastR():
+    """Load the public 2025 season stats (CSV ~2 MB)."""
+    df = pd.read_csv(NFLFASTR_URL, compression="gzip")
+    # Filter only 2025 season if available, else show last available
+    max_season = df["season"].max()
+    df = df[df["season"] == max_season]
+    return df
 
 def fetch_weather(city):
-    """Fetch weather from OpenWeather."""
     city = (city or "").strip()
     if not city:
         return None, None
     try:
-        r = requests.get(OPENWEATHER_URL.format(city=city, key=OPENWEATHER_KEY), timeout=20)
+        r = requests.get(OPENWEATHER_URL.format(city=city, key=OPENWEATHER_KEY), timeout=15)
         if r.status_code == 200:
             j = r.json()
             return j["weather"][0]["main"], j["main"]["temp"]
@@ -105,64 +62,74 @@ def calc_prob(series, line, direction):
     hits = (series > line).sum() if direction == "Over" else (series < line).sum()
     return round(100 * hits / len(series), 1)
 
-# -------------------------------------------------------------------------
+# --------------------------------------------------------------------
 if st.button("Analyze Player", use_container_width=True):
     if not player_name or sportsbook_line <= 0:
         st.warning("Enter a valid player name and sportsbook line.")
-    else:
-        st.info("Fetching data from ESPN API …")
+        st.stop()
 
-        # Search player on ESPN
-        player = search_player_espm(player_name)
-        if not player:
-            st.error(f"No player found for '{player_name}'. Try full name.")
-            st.stop()
+    st.info("Loading NFLfastR player dataset …")
+    try:
+        df = load_nflfastR()
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
+        st.stop()
 
-        pid = player.get("id") or player.get("uid", "").split(":")[-1]
-        df = fetch_player_stats(pid)
+    q = player_name.lower()
+    players = df[df["player_name"].str.lower().str.contains(q)]
+    if players.empty:
+        st.error(f"No player found for '{player_name}'. Try last name only.")
+        st.stop()
 
-        if df is None or df.empty:
-            st.error(f"No stats available for '{player_name}' (ESPN data may be limited).")
-            st.stop()
+    # pick top-occurrence player_id (handles duplicates)
+    pid = players["player_id"].mode()[0]
+    p_df = df[df["player_id"] == pid].copy()
 
-        stat_map = {
-            "Passing Yards": "passing_yards",
-            "Rushing Yards": "rushing_yards",
-            "Receiving Yards": "receiving_yards"
-        }
-        stat_col = stat_map[stat_type]
-        df = df[df["week"].notna()].sort_values("week")
+    stat_map = {
+        "Passing Yards": "passing_yards",
+        "Rushing Yards": "rushing_yards",
+        "Receiving Yards": "receiving_yards"
+    }
+    stat_col = stat_map[stat_type]
 
-        # --------------- Visualization ---------------
-        fig = px.bar(df, x="week", y=stat_col, text=stat_col,
-                     title=f"{player_name} — {stat_type} (2025 Season)")
-        fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
-        st.plotly_chart(fig, use_container_width=True)
+    # keep only non-null weekly records
+    p_df = p_df[p_df[stat_col].notna()]
+    if p_df.empty:
+        st.error(f"No {stat_type} data for {player_name}.")
+        st.stop()
 
-        # --------------- Probability ---------------
-        st.subheader("🎯 Baseline Probability")
-        col1, col2 = st.columns(2)
-        if col1.button("Over"):
-            st.success(f"Over Probability: {calc_prob(df[stat_col], sportsbook_line, 'Over')}%")
-        if col2.button("Under"):
-            st.warning(f"Under Probability: {calc_prob(df[stat_col], sportsbook_line, 'Under')}%")
+    # group by week
+    view = p_df.groupby("week", as_index=False)[stat_col].sum().sort_values("week")
 
-        # --------------- Context Adjustments ---------------
-        st.divider()
-        st.subheader("📊 Context-Adjusted Probability")
+    # Visualize
+    fig = px.bar(view, x="week", y=stat_col, text=stat_col,
+                 title=f"{player_name} — {stat_type} ({int(p_df['season'].max())} Season)")
+    fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
+    st.plotly_chart(fig, use_container_width=True)
 
-        weather, temp = fetch_weather(weather_city)
-        base = calc_prob(df[stat_col], sportsbook_line, "Over")
-        adj = base
-        if weather and "rain" in weather.lower():
-            adj -= 8
-        if temp and temp < 40:
-            adj -= 5
-        adj = max(0, min(100, adj))
+    # Probability
+    st.subheader("🎯 Baseline Probability")
+    col1, col2 = st.columns(2)
+    if col1.button("Over"):
+        st.success(f"Over Probability: {calc_prob(view[stat_col], sportsbook_line, 'Over')}%")
+    if col2.button("Under"):
+        st.warning(f"Under Probability: {calc_prob(view[stat_col], sportsbook_line, 'Under')}%")
 
-        st.info(f"Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
-        st.success(f"Adjusted Over Probability: {adj}%")
+    # Context
+    st.divider()
+    st.subheader("📊 Context-Adjusted Probability")
+    weather, temp = fetch_weather(weather_city)
+    base = calc_prob(view[stat_col], sportsbook_line, "Over")
+    adj = base
+    if weather and "rain" in weather.lower():
+        adj -= 8
+    if temp and temp < 40:
+        adj -= 5
+    adj = max(0, min(100, adj))
 
-# -------------------------------------------------------------------------
+    st.info(f"Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
+    st.success(f"Adjusted Over Probability: {adj}%")
+
+# --------------------------------------------------------------------
 st.markdown("---")
-st.caption("Data: ESPN API (Free) • OpenWeather • Build vA30 (2025)")
+st.caption("Data: NFLfastR (GitHub mirror, free) • OpenWeather • Build vA31 (2025)")
