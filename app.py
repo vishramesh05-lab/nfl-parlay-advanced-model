@@ -48,15 +48,19 @@ h1,h2,h3 {color:#00b0ff;font-weight:600;}
 </style>
 """, unsafe_allow_html=True)
 
-# Auto refresh (every 30 min)
-st_autorefresh = st.experimental_rerun if False else None  # guard for type checkers
-# --- Auto-refresh every 30 minutes (Streamlit 1.37-safe) ---
-# Clear the modern caches (ok if no-op)
+# --- Auto refresh every 30 minutes (1.37-safe) ---
+# Clear modern caches (no-op if empty)
 try:
     st.cache_data.clear()
     st.cache_resource.clear()
 except Exception:
     pass
+
+# Soft page reload every 30 minutes so fresh data is pulled when caches expire
+st.markdown(
+    "<script>setTimeout(() => { window.location.reload(); }, 1800000);</script>",
+    unsafe_allow_html=True,
+)
 
 # Soft page reload in 30 minutes so fresh data is pulled when the cache TTL expires
 st.markdown(
