@@ -36,7 +36,16 @@ def merge_jsons():
             dfs.append(df)
         except Exception:
             pass
-    return pd.concat(dfs, ignore_index=True).fillna(0) if dfs else pd.DataFrame()
+    try:
+    if dfs and len(dfs) > 0:
+        df_all = pd.concat(dfs, ignore_index=True).fillna(0)
+        return df_all
+    else:
+        print("⚠️ No JSON data found in /data folder. Returning empty DataFrame.")
+        return pd.DataFrame()
+except Exception as e:
+    print(f"❌ Error merging JSON files: {e}")
+    return pd.DataFrame()
 
 # -----------------------------
 # AI TRAINING & RETRAINING
