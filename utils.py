@@ -93,10 +93,35 @@ def detect_team_column(df): return _detect_col(df, TEAM_CANDIDATES)
 def detect_opp_column(df): return _detect_col(df, OPP_CANDIDATES)
 
 # -------------------- MARKET TARGET DETECTION --------------------
-def find_target_column(df: pd.DataFrame, market: str) -> tuple[pd.Series | None, str | None]:
-    """Heuristically find or build the target series for a given market."""
-    cols = {c.lower(): c for c in df.columns}
-    lc = list(cols.keys())
+def find_target_column(df: pd.DataFrame, market: str):
+    """Finds the right numeric stat column for each market, regardless of naming variations."""
+    cols = [c.lower() for c in df.columns]
+    mapper = dict(zip(cols, df.columns))  # lower→original
+
+    def match(*keywords):
+        for c in cols:
+            if all(k in c for k in keywords):
+                return mapper[c]
+        return None
+
+    if market == "Passing Yards":
+        return (df[match("pass", "yds")] if match("pass", "yds") else None,
+                match("pass", "yds"))
+    if market == "Rushing Yards":
+        return (df[match("rush", "yds")] or df[match("rushing", "yards")],
+                match("rush", "yds") or match("rushing", "yards"))
+    if market == "Receiving Yards":
+        return (df[match("rec", "yds")] or df[match("receiv", "yards")],
+                match("rec", "yds") or match("receiv", "yards"))
+    if market == "Passing TDs":
+        return (df[match("pass", "td")], match("pass", "td"))
+    if market == "Rushing+Receiving TDs":
+        rush = match("rush", "td")
+        rec = match("rec", "td") or match("receiv", "td")
+        if rush or rec:
+            val = (df[rush] if rush else 0) + (df[rec] if rec else 0)
+            return val, f"{rush}+{rec}"
+    return None, None
 
     def find_by_keywords(kw_list: list[str]) -> str | None:
         for c in lc:
