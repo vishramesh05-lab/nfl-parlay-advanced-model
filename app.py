@@ -58,15 +58,20 @@ with st.sidebar:
     st.caption("Auto-refresh every 30 min • Full retrain nightly @ 12:00 AM EST")
 
 # ============ DATA LOAD ============
-@st.cache_data(ttl=1800, show_spinner=True)
-def load_data():
-    df = utils.load_all_jsons()
-    if df.empty:
-        return df
-    return utils.standardize_columns(df)
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_all():
+    # read + normalize
+    df_raw = utils.load_all_jsons(DATA_DIR)
+    df = utils.standardize_columns(df_raw)
+    return df
 
-data = load_data()
+def _load_data_ready():
+    return _load_all()
 
+# later where you currently do:
+# data = _load_all_jsons()
+# replace with:
+data = _load_data_ready()
 st.title("🏈 NFL Parleggy AI Model")
 st.caption("Live JSON → Feature Engine → Probabilities → Parlay Calculator")
 
