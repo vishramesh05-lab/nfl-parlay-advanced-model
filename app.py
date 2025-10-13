@@ -1,5 +1,5 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA41
-# Live JSON API version using SportsDataverse (PFR mirror)
+# NFL Parlay Helper (Dual Probabilities, 2025) — vA42
+# Live 365Scores API + Over/Under probability model
 # Author: Vish (2025)
 
 import streamlit as st
@@ -8,18 +8,18 @@ import requests
 import plotly.express as px
 import datetime
 
-st.set_page_config(
-    page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
-    layout="wide",
-    page_icon="🏈"
-)
+# ---------------------------------------------------------------
+# Page Setup
+st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
+                   layout="wide", page_icon="🏈")
 
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
             unsafe_allow_html=True)
-st.caption("Live data + probability model — SportsDataverse NFL API + OpenWeather")
-st.caption("Build vA41 | by Vish")
+st.caption("Live data + probability model — 365Scores API + OpenWeather")
+st.caption("Build vA42 | by Vish")
 
-# Sidebar
+# ---------------------------------------------------------------
+# Sidebar Filters
 st.sidebar.header("⚙️ Filters")
 current_week = st.sidebar.slider("Current week", 1, 18, 6)
 lookback_weeks = st.sidebar.slider("Lookback (weeks)", 1, 8, 5)
@@ -34,30 +34,31 @@ weather_city = st.text_input("Weather City (optional, e.g., Detroit)", "")
 OPENWEATHER_KEY = "demo"
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------
+# Helper Functions
+
 @st.cache_data(ttl=3600)
-def fetch_player_data(player_name: str):
+def fetch_365scores_player_stats():
     """
-    Query SportsDataverse for NFL player game logs.
+    Fetches live NFL 2025 stats from 365Scores public API.
     """
-    base_url = "https://sportsdataverse.net/nfl/players/search"
-    try:
-        search = requests.get(f"{base_url}?q={player_name}", timeout=15)
-        search.raise_for_status()
-        results = search.json()
-        if len(results) == 0:
-            raise ValueError("Player not found in SportsDataverse.")
-        # pick top match
-        player_id = results[0]["id"]
-        player_url = f"https://sportsdataverse.net/nfl/players/{player_id}_gamelog_2025.json"
-        data = requests.get(player_url, timeout=20)
-        data.raise_for_status()
-        df = pd.DataFrame(data.json()["games"])
-        df = df[df["week"].notna()]
-        df["week"] = df["week"].astype(int)
-        return df, results[0]["name"]
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch data for {player_name}: {e}")
+    base_url = "https://webapi.365scores.com/web/stats/players/?competition=352&season=2025"
+    r = requests.get(base_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    data = r.json()
+    records = []
+    for p in data.get("players", []):
+        name = p.get("name", "")
+        stats = p.get("statistics", {})
+        records.append({
+            "player": name,
+            "team": p.get("team", {}).get("shortName", ""),
+            "passing_yards": stats.get("passingYards", 0),
+            "rushing_yards": stats.get("rushingYards", 0),
+            "receiving_yards": stats.get("receivingYards", 0),
+            "games_played": stats.get("gamesPlayed", 0)
+        })
+    return pd.DataFrame(records)
 
 def fetch_weather(city):
     if not city.strip():
@@ -71,62 +72,59 @@ def fetch_weather(city):
         pass
     return None, None
 
-def calc_prob(series, line, direction):
-    if len(series) == 0:
-        return 0.0
-    hits = (series > line).sum() if direction == "Over" else (series < line).sum()
-    return round(100 * hits / len(series), 1)
+def calc_prob(value, line, direction):
+    """Simple binary probability (not historical) — extend later when time series available."""
+    if direction == "Over":
+        return 100 if value > line else 0
+    return 100 if value < line else 0
 
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------
+# Main Logic
 if st.button("Analyze Player", use_container_width=True):
-    if not player_name or sportsbook_line <= 0:
-        st.warning("Enter a valid player name and sportsbook line.")
-        st.stop()
-
+    st.info("Fetching live player data from 365Scores …")
     try:
-        st.info("Fetching live 2025 data from SportsDataverse …")
-        df, canonical_name = fetch_player_data(player_name)
+        df = fetch_365scores_player_stats()
     except Exception as e:
-        st.error(str(e))
+        st.error(f"Failed to load 365Scores data: {e}")
         st.stop()
 
-    # Select the correct stat column
+    match = df[df["player"].str.lower().str.contains(player_name.lower().strip())]
+    if match.empty:
+        st.error(f"No player found for '{player_name}'. Try partial name (e.g. 'Mahomes').")
+        st.stop()
+
+    row = match.iloc[0]
+    st.success(f"✅ Found {row['player']} ({row['team']})")
+
+    # Select Stat
     stat_map = {
-        "Passing Yards": ["passing_yards", "pass_yards", "pass_yds"],
-        "Rushing Yards": ["rushing_yards", "rush_yards", "rush_yds"],
-        "Receiving Yards": ["receiving_yards", "rec_yards", "rec_yds"]
+        "Passing Yards": "passing_yards",
+        "Rushing Yards": "rushing_yards",
+        "Receiving Yards": "receiving_yards"
     }
-    cols = stat_map[stat_type]
-    col = next((c for c in cols if c in df.columns), None)
-    if not col:
-        st.error("No matching stat column found in API data.")
-        st.stop()
+    col = stat_map[stat_type]
+    value = row[col]
 
-    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    view = df[["week", col]].rename(columns={col: "value"}).sort_values("week")
-
-    # Chart
-    fig = px.bar(
-        view, x="week", y="value", text="value",
-        title=f"{canonical_name} — {stat_type} (2025 Season)"
-    )
+    # Chart (single value bar)
+    view = pd.DataFrame({"Stat": [stat_type], "Value": [value]})
+    fig = px.bar(view, x="Stat", y="Value", text="Value",
+                 title=f"{row['player']} — {stat_type} (2025 Total)")
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Probability outputs
+    # Baseline Probability
     st.subheader("🎯 Baseline Probability")
     col1, col2 = st.columns(2)
     if col1.button("Over"):
-        st.success(f"Over Probability: {calc_prob(view['value'], sportsbook_line, 'Over')}%")
+        st.success(f"Over Probability: {calc_prob(value, sportsbook_line, 'Over')}%")
     if col2.button("Under"):
-        st.warning(f"Under Probability: {calc_prob(view['value'], sportsbook_line, 'Under')}%")
+        st.warning(f"Under Probability: {calc_prob(value, sportsbook_line, 'Under')}%")
 
-    # Weather adjustment
+    # Adjusted Probability
     st.divider()
     st.subheader("📊 Context-Adjusted Probability")
     weather, temp = fetch_weather(weather_city)
-    base = calc_prob(view["value"], sportsbook_line, "Over")
-    adj = base
+    adj = calc_prob(value, sportsbook_line, "Over")
     if weather and "rain" in weather.lower():
         adj -= 8
     if temp and temp < 40:
@@ -137,17 +135,16 @@ if st.button("Analyze Player", use_container_width=True):
 
     # Summary
     st.divider()
-    st.subheader("📈 Season Summary")
+    st.subheader("📈 Player Summary")
     stats = {
-        "Games Played": len(view),
-        "Average": round(view["value"].mean(), 1),
-        "Std Dev": round(view["value"].std(), 1),
-        "Max": view["value"].max(),
-        "Last 3 Avg": round(view.tail(3)["value"].mean(), 1)
+        "Games Played": int(row["games_played"]),
+        "Total Passing Yards": int(row["passing_yards"]),
+        "Total Rushing Yards": int(row["rushing_yards"]),
+        "Total Receiving Yards": int(row["receiving_yards"]),
     }
     st.table(pd.DataFrame([stats]))
     st.caption(f"Last refresh: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------
 st.markdown("---")
-st.caption("Data: SportsDataverse NFL (mirror of Pro-Football-Reference) • OpenWeather • Build vA41 (2025)")
+st.caption("Data: 365Scores API (live) • OpenWeather • Build vA42 (2025)")
