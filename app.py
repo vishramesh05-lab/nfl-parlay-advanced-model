@@ -1,6 +1,6 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA36
-# Fixed dataset path (Oct 2025) + probability model
-# Author: Vish
+# NFL Parlay Helper (Dual Probabilities, 2025) — vA38
+# Local dataset + one-click weekly reload + full probability model
+# Author: Vish (2025)
 
 import streamlit as st
 import pandas as pd
@@ -8,15 +8,18 @@ import requests
 import plotly.express as px
 import gzip, io, os, datetime
 
+# ---------------------------------------------------------------------
+# Page setup
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
                    layout="wide", page_icon="🏈")
 
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
             unsafe_allow_html=True)
-st.caption("Live data + probability model — NFLverse (free) + OpenWeather")
-st.caption("Build vA36 | by Vish")
+st.caption("Live data + probability model — NFLverse (local mirror) + OpenWeather")
+st.caption("Build vA38 | by Vish")
 
-# Sidebar
+# ---------------------------------------------------------------------
+# Sidebar filters
 st.sidebar.header("⚙️ Filters")
 current_week = st.sidebar.slider("Current week", 1, 18, 6)
 lookback_weeks = st.sidebar.slider("Lookback (weeks)", 1, 8, 5)
@@ -29,48 +32,35 @@ sportsbook_line = st.number_input("Sportsbook Line", step=0.5)
 opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)", "")
 weather_city = st.text_input("Weather City (optional, e.g., Detroit)", "")
 
-# -------------------------------------------------------------------------
-# Data sources
-NFLVERSE_PRIMARY = "https://raw.githubusercontent.com/nflverse/nflverse-data/main/data/player_stats_regular_season.csv.gz"
-NFLVERSE_FALLBACK = "https://data.nflverse.com/current/player_stats_regular_season.csv.gz"
-LOCAL_CACHE = "/tmp/player_stats_cache.csv.gz"
-
+# ---------------------------------------------------------------------
+# Data locations
+LOCAL_FILE = "player_stats_regular_season.csv.gz"
+NFLVERSE_URL = "https://raw.githubusercontent.com/nflverse/nflverse-data/main/data/player_stats_regular_season.csv.gz"
 OPENWEATHER_KEY = "demo"
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Data loader
 @st.cache_data(ttl=3600)
-def load_nfl_data():
-    """Load NFLverse player stats with fallback + local cache."""
-    urls = [NFLVERSE_PRIMARY, NFLVERSE_FALLBACK]
-    last_err = None
-
-    for url in urls:
-        try:
-            if debug_mode:
-                st.write(f"Attempting {url}")
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-            with io.BytesIO(r.content) as buf, gzip.open(buf, "rt") as f:
-                df = pd.read_csv(f)
-            df.to_csv(LOCAL_CACHE, index=False, compression="gzip")
-            if debug_mode:
-                st.write(f"Loaded {len(df)} rows from {url}")
-            break
-        except Exception as e:
-            last_err = e
-            continue
-    else:
-        if os.path.exists(LOCAL_CACHE):
-            df = pd.read_csv(LOCAL_CACHE, compression="gzip")
-            if debug_mode:
-                st.write("Loaded data from local cache.")
-        else:
-            raise RuntimeError(f"Failed to load from all mirrors: {last_err}")
-
-    max_season = df["season"].max()
-    df = df[df["season"] == max_season]
+def load_local_data():
+    """Always-available local dataset."""
+    with gzip.open(LOCAL_FILE, "rt") as f:
+        df = pd.read_csv(f)
+    df = df[df["season"] == df["season"].max()]
     return df
+
+def reload_dataset():
+    """Refresh local file from nflverse mirror."""
+    try:
+        st.info("Fetching latest NFLverse dataset …")
+        r = requests.get(NFLVERSE_URL, timeout=45)
+        r.raise_for_status()
+        with open(LOCAL_FILE, "wb") as f:
+            f.write(r.content)
+        st.success("✅ Data reloaded successfully!")
+        st.cache_data.clear()
+    except Exception as e:
+        st.error(f"⚠️ Failed to reload dataset: {e}")
 
 def fetch_weather(city):
     city = (city or "").strip()
@@ -86,24 +76,32 @@ def fetch_weather(city):
     return None, None
 
 def calc_prob(series, line, direction):
-    if len(series) == 0: return 0.0
+    if len(series) == 0:
+        return 0.0
     hits = (series > line).sum() if direction == "Over" else (series < line).sum()
     return round(100 * hits / len(series), 1)
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Reload button (appears above main action)
+st.divider()
+if st.button("🔄 Reload Latest NFLverse Data"):
+    reload_dataset()
+    st.stop()
+
+# ---------------------------------------------------------------------
+# Main analysis
 if st.button("Analyze Player", use_container_width=True):
     if not player_name or sportsbook_line <= 0:
         st.warning("Enter a valid player name and sportsbook line.")
         st.stop()
 
-    st.info("Loading NFLverse dataset …")
+    st.info("Loading local NFLverse dataset …")
     try:
-        df = load_nfl_data()
+        df = load_local_data()
     except Exception as e:
-        st.error(f"Failed to load dataset: {e}")
+        st.error(f"Failed to load data: {e}")
         st.stop()
 
-    # Filter player
     q = player_name.lower().strip()
     players = df[df["player_name"].str.lower().str.contains(q)]
     if players.empty:
@@ -127,8 +125,10 @@ if st.button("Analyze Player", use_container_width=True):
     view = p_df.groupby("week", as_index=False)[stat_col].sum().sort_values("week")
 
     # Chart
-    fig = px.bar(view, x="week", y=stat_col, text=stat_col,
-                 title=f"{player_name} — {stat_type} ({int(p_df['season'].max())} Season)")
+    fig = px.bar(
+        view, x="week", y=stat_col, text=stat_col,
+        title=f"{player_name} — {stat_type} ({int(p_df['season'].max())} Season)"
+    )
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -140,15 +140,18 @@ if st.button("Analyze Player", use_container_width=True):
     if col2.button("Under"):
         st.warning(f"Under Probability: {calc_prob(view[stat_col], sportsbook_line, 'Under')}%")
 
-    # Adjusted probability
+    # Context adjustment
     st.divider()
     st.subheader("📊 Context-Adjusted Probability")
     weather, temp = fetch_weather(weather_city)
     base = calc_prob(view[stat_col], sportsbook_line, "Over")
     adj = base
-    if weather and "rain" in weather.lower(): adj -= 8
-    if temp and temp < 40: adj -= 5
+    if weather and "rain" in weather.lower():
+        adj -= 8
+    if temp and temp < 40:
+        adj -= 5
     adj = max(0, min(100, adj))
+
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
@@ -164,7 +167,8 @@ if st.button("Analyze Player", use_container_width=True):
     }
     st.table(pd.DataFrame([stats]))
 
+    # Timestamp
     st.caption(f"Last refresh: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 st.markdown("---")
-st.caption("Data: NFLverse (Oct 2025 path) • OpenWeather • Build vA36 (2025)")
+st.caption("Data: NFLverse (local) • OpenWeather • Build vA38 (2025)")
