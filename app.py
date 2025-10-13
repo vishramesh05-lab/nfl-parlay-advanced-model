@@ -1,109 +1,86 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA46
-# Live Kaggle (NFL Big Data Bowl 2025) + Over/Under probability model
-# Author: Vishvin Ramesh | 2025
-from kaggle.api.kaggle_api_extended import KaggleApi
-import os
-import streamlit as st
+# 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
+# Source: FootballDB (weekly) + OpenWeather
+# Build vA49 | Vishvin Ramesh
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import datetime
-import os
-import subprocess
 import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+import plotly.express as px
 
-# ---------------------------------------------------------------
-# Streamlit Page Configuration
+# ---------------------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------------------
 st.set_page_config(
-    page_title="NFL Parlay Helper (2025)",
-    layout="wide",
-    page_icon="🏈"
+    page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
+    page_icon="🏈",
+    layout="wide"
 )
 
-st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
-            unsafe_allow_html=True)
-st.caption("Live data + probability model — Kaggle NFL Big Data Bowl 2025 + OpenWeather")
-st.caption("Build vA46 | by Vishvin Ramesh")
+st.markdown(
+    "<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
+    unsafe_allow_html=True
+)
+st.caption("Live data probability model — FootballDB (weekly) + OpenWeather")
+st.caption("Build vA49 | by Vishvin Ramesh")
 
-# ---------------------------------------------------------------
-# 🔐 Load Kaggle Credentials (from Streamlit Secrets)
-if "KAGGLE_USERNAME" in st.secrets and "KAGGLE_KEY" in st.secrets:
-    os.environ["KAGGLE_USERNAME"] = st.secrets["KAGGLE_USERNAME"]
-    os.environ["KAGGLE_KEY"] = st.secrets["KAGGLE_KEY"]
-else:
-    st.error("⚠️ Kaggle credentials not found. Add them under 'App Settings → Secrets' in Streamlit Cloud.")
-    st.stop()
-
-# ---------------------------------------------------------------
-# Sidebar Filters
+# ---------------------------------------------------------
+# SIDEBAR FILTERS
+# ---------------------------------------------------------
 st.sidebar.header("⚙️ Filters")
-current_week = st.sidebar.slider("Current week", 1, 18, 6)
+current_week = st.sidebar.slider("Current Week", 1, 18, 6)
 lookback_weeks = st.sidebar.slider("Lookback (weeks)", 1, 8, 5)
+debug_mode = st.sidebar.checkbox("Enable Debug Mode", False)
 
-# Inputs
+# ---------------------------------------------------------
+# USER INPUTS
+# ---------------------------------------------------------
 player_name = st.text_input("Player Name", placeholder="e.g. Patrick Mahomes")
 stat_type = st.selectbox("Stat Type", ["Passing Yards", "Rushing Yards", "Receiving Yards"])
-sportsbook_line = st.number_input("Sportsbook Line", step=0.5, value=250.0)
-opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)", "")
-weather_city = st.text_input("Weather City (optional, e.g., Detroit)", "")
+sportsbook_line = st.number_input("Sportsbook Line", step=0.5)
+opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)")
+weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 
-OPENWEATHER_KEY = "demo"  # Replace with your key if you want live temps
+# ---------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------
+OPENWEATHER_KEY = "demo"  # replace with your key
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
+CACHE_FILE = "footballdb_2025.csv"
 
-# ---------------------------------------------------------------
+# ---------------------------------------------------------
+# FUNCTIONS
+# ---------------------------------------------------------
 @st.cache_data(ttl=3600)
-def fetch_kaggle_data():
-    """
-    Fetches NFL Big Data Bowl 2025 dataset using Kaggle's Python API (not CLI).
-    Compatible with Streamlit Cloud.
-    """
-    from kaggle.api.kaggle_api_extended import KaggleApi
+def fetch_footballdb_data():
+    """Scrape weekly player stats from FootballDB (passing/rushing/receiving)."""
+    urls = {
+        "Passing Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=passing",
+        "Rushing Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=rushing",
+        "Receiving Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=receiving"
+    }
+    all_data = []
+    for cat, url in urls.items():
+        try:
+            r = requests.get(url, timeout=15)
+            soup = BeautifulSoup(r.text, "html.parser")
+            table = soup.find("table", {"class": "statistics"})
+            df = pd.read_html(str(table))[0]
+            df["Category"] = cat
+            all_data.append(df)
+        except Exception as e:
+            if debug_mode:
+                st.error(f"Error loading {cat}: {e}")
+    return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
 
-    dataset = "nfl-big-data-bowl-2025"
-    csv_path = "player_weekly_stats.csv"
-
-    try:
-        api = KaggleApi()
-        api.authenticate()  # Uses Streamlit secrets for authentication
-
-        # Download dataset zip if not already there
-        if not os.path.exists("data.zip"):
-            st.info("📦 Downloading NFL 2025 dataset from Kaggle ... please wait ⏳")
-            api.competition_download_files(dataset, path=".", quiet=False)
-        else:
-            st.info("✅ Using cached Kaggle zip file.")
-
-        # Unzip contents
-        os.system("unzip -o '*.zip' > /dev/null 2>&1")
-
-    except Exception as e:
-        raise RuntimeError(f"Kaggle API error: {e}")
-
-    # Try reading likely file names
-    try:
-        possible_files = [
-            "player_weekly_stats.csv",
-            "player_stats.csv",
-            "players.csv",
-            "week_stats.csv"
-        ]
-        for f in possible_files:
-            if os.path.exists(f):
-                df = pd.read_csv(f)
-                st.success(f"✅ Loaded {f} successfully.")
-                return df
-        raise FileNotFoundError("Expected data file not found after Kaggle extraction.")
-    except Exception as e:
-        raise RuntimeError(f"Error reading CSV: {e}")
-
-# ---------------------------------------------------------------
 def fetch_weather(city):
-    """Fetch current weather and temperature."""
-    if not city.strip():
+    """Fetch weather and temperature."""
+    if not city:
         return None, None
     try:
-        r = requests.get(OPENWEATHER_URL.format(city=city, key=OPENWEATHER_KEY), timeout=10)
+        r = requests.get(OPENWEATHER_URL.format(city=city, key=OPENWEATHER_KEY))
         if r.status_code == 200:
             j = r.json()
             return j["weather"][0]["main"], j["main"]["temp"]
@@ -111,108 +88,79 @@ def fetch_weather(city):
         pass
     return None, None
 
-
 def calc_prob(series, line, direction):
-    """Calculate simple over/under probability."""
+    """Calculate over/under probability."""
     if len(series) == 0:
-        return 0
+        return 0.0
     hits = (series > line).sum() if direction == "Over" else (series < line).sum()
     return round(100 * hits / len(series), 1)
 
-# ---------------------------------------------------------------
-# Reload data manually
-if st.button("🔄 Reload Latest Kaggle Data", use_container_width=True):
+# ---------------------------------------------------------
+# LOAD DATA
+# ---------------------------------------------------------
+if st.button("🔁 Reload Latest FootballDB Data", use_container_width=True):
     st.cache_data.clear()
-    st.success("Cache cleared — new data will load on next analysis.")
+    st.success("Data cache cleared. Click 'Analyze Player' to refresh with latest stats.")
 
-# ---------------------------------------------------------------
-# Analyze player logic
+st.divider()
+
+# ---------------------------------------------------------
+# MAIN ACTION
+# ---------------------------------------------------------
 if st.button("Analyze Player", use_container_width=True):
-    st.info("Fetching 2025 NFL player stats from Kaggle …")
-    try:
-        df = fetch_kaggle_data()
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
+    st.info("Fetching live weekly stats from FootballDB …")
+    df = fetch_footballdb_data()
 
-    df.columns = [c.lower().strip() for c in df.columns]
+    if df.empty:
+        st.error("⚠️ Failed to load player data from FootballDB.")
+    else:
+        # Normalize player name column (FootballDB uses multiple naming styles)
+        df.columns = [c.strip() for c in df.columns]
+        player_matches = df[df["Player"].str.contains(player_name, case=False, na=False)]
 
-    # Ensure consistent stat column mapping
-    stat_map = {
-        "Passing Yards": ["pass_yards", "passingyards", "passing_yards"],
-        "Rushing Yards": ["rush_yards", "rushingyards", "rushing_yards"],
-        "Receiving Yards": ["rec_yards", "receivingyards", "receiving_yards"]
-    }
+        if player_matches.empty:
+            st.warning(f"No data found for '{player_name}'. Try a shorter name fragment (e.g., 'Mahomes').")
+        else:
+            # Select by category
+            stat_df = player_matches[player_matches["Category"] == stat_type]
+            if stat_df.empty:
+                st.warning(f"No {stat_type} data for {player_name}.")
+            else:
+                # Extract numeric yard values
+                if stat_type == "Passing Yards":
+                    values = stat_df["Yards"].astype(float)
+                elif stat_type == "Rushing Yards":
+                    values = stat_df["Yards"].astype(float)
+                else:
+                    values = stat_df["Yards"].astype(float)
 
-    found_col = None
-    for alias in stat_map[stat_type]:
-        if alias in df.columns:
-            found_col = alias
-            break
+                # Visualization
+                fig = px.bar(
+                    x=np.arange(len(values)),
+                    y=values,
+                    text=values,
+                    title=f"{player_name} — {stat_type} (Last {lookback_weeks} Games)"
+                )
+                fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
+                st.plotly_chart(fig, use_container_width=True)
 
-    if not found_col:
-        st.error(f"Could not find column for {stat_type}. Please verify Kaggle data file.")
-        st.stop()
+                st.subheader("🎯 Baseline Probability")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.success(f"Over Probability: {calc_prob(values, sportsbook_line, 'Over')}%")
+                with col2:
+                    st.warning(f"Under Probability: {calc_prob(values, sportsbook_line, 'Under')}%")
 
-    if "player" not in df.columns:
-        st.error("Dataset missing 'player' column.")
-        st.stop()
+                # Weather adjustment
+                weather, temp = fetch_weather(weather_city)
+                adj = calc_prob(values, sportsbook_line, "Over")
+                if weather and "rain" in weather.lower():
+                    adj -= 8
+                if temp and temp < 40:
+                    adj -= 5
+                adj = max(0, min(100, adj))
+                st.divider()
+                st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
+                st.success(f"Adjusted Over Probability: {adj}%")
 
-    # Search player
-    match = df[df["player"].str.lower().str.contains(player_name.lower().strip(), na=False)]
-    if match.empty:
-        st.error(f"No player found for '{player_name}'. Try partial name (e.g., 'Mahomes').")
-        st.stop()
-
-    # Recent weeks
-    recent_games = match.tail(lookback_weeks)
-    values = recent_games[found_col].astype(float).dropna()
-
-    st.success(f"✅ Found {player_name} — Analyzing last {len(values)} games.")
-
-    # Chart
-    fig = px.bar(
-        recent_games, x="week" if "week" in recent_games.columns else recent_games.index,
-        y=found_col, text=found_col,
-        title=f"{player_name} — {stat_type} (Last {lookback_weeks} Games)"
-    )
-    fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Baseline probabilities
-    st.subheader("🎯 Baseline Probability")
-    col1, col2 = st.columns(2)
-    if col1.button("Over"):
-        st.success(f"Over Probability: {calc_prob(values, sportsbook_line, 'Over')}%")
-    if col2.button("Under"):
-        st.warning(f"Under Probability: {calc_prob(values, sportsbook_line, 'Under')}%")
-
-    # Context adjustments
-    st.divider()
-    st.subheader("📊 Context-Adjusted Probability")
-    weather, temp = fetch_weather(weather_city)
-    adj = calc_prob(values, sportsbook_line, "Over")
-    if weather and "rain" in weather.lower():
-        adj -= 8
-    if temp and temp < 40:
-        adj -= 5
-    adj = max(0, min(100, adj))
-
-    st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
-    st.success(f"Adjusted Over Probability: {adj}%")
-
-    # Summary table
-    st.divider()
-    st.subheader("📈 Player Summary (Last Games)")
-    summary = {
-        "Games Analyzed": len(values),
-        "Average Yards": round(values.mean(), 1),
-        "Max Yards": int(values.max()) if len(values) > 0 else 0,
-        "Min Yards": int(values.min()) if len(values) > 0 else 0
-    }
-    st.table(pd.DataFrame([summary]))
-    st.caption(f"Last refresh: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-# ---------------------------------------------------------------
-st.markdown("---")
-st.caption("Data: Kaggle NFL Big Data Bowl 2025 • OpenWeather • Build vA46 (2025)")
+st.caption("Data: FootballDB (weekly, public) | Weather: OpenWeather | Build vA49")
