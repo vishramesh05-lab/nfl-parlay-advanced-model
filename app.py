@@ -1,21 +1,23 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA40
-# Live scraper from Pro-Football-Reference (2025)
-# Author: Vish
+# NFL Parlay Helper (Dual Probabilities, 2025) — vA41
+# Live JSON API version using SportsDataverse (PFR mirror)
+# Author: Vish (2025)
 
 import streamlit as st
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 import plotly.express as px
 import datetime
 
-st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
-                   layout="wide", page_icon="🏈")
+st.set_page_config(
+    page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
+    layout="wide",
+    page_icon="🏈"
+)
 
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
             unsafe_allow_html=True)
-st.caption("Live data + probability model — Pro-Football-Reference + OpenWeather")
-st.caption("Build vA40 | by Vish")
+st.caption("Live data + probability model — SportsDataverse NFL API + OpenWeather")
+st.caption("Build vA41 | by Vish")
 
 # Sidebar
 st.sidebar.header("⚙️ Filters")
@@ -34,39 +36,31 @@ OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appi
 
 # ---------------------------------------------------------------------
 @st.cache_data(ttl=3600)
-def fetch_pfr_data(player_url):
-    """Scrape weekly stats for the player from Pro-Football-Reference."""
-    r = requests.get(player_url, headers={"User-Agent": "Mozilla/5.0"})
-    if r.status_code != 200:
-        raise ValueError(f"HTTP {r.status_code} from PFR.")
-    soup = BeautifulSoup(r.text, "html.parser")
-    table = soup.find("table", id="passing" if "MahoPa00" in player_url else None)
-    # If not found, use pandas fallback:
-    tables = pd.read_html(r.text)
-    df = pd.concat(tables, axis=0)
-    # Keep only numeric week rows
-    df = df[df["Week"].astype(str).str.isnumeric()]
-    df["Week"] = df["Week"].astype(int)
-    return df
-
-def find_player_url(name):
-    """Map player name → Pro-Football-Reference URL (simplified)."""
-    base = "https://www.pro-football-reference.com/players/"
-    lookup = {
-        "patrick mahomes": "M/MahoPa00",
-        "jayden daniels": "D/DaniJa03",
-        "josh allen": "A/AlleJo02",
-        "lamar jackson": "J/JackLa00",
-        "joe burrow": "B/BurrJo01",
-    }
-    name = name.lower().strip()
-    if name in lookup:
-        return base + lookup[name] + "/gamelog/2025/"
-    raise ValueError("Player not in lookup. Add to dictionary manually.")
+def fetch_player_data(player_name: str):
+    """
+    Query SportsDataverse for NFL player game logs.
+    """
+    base_url = "https://sportsdataverse.net/nfl/players/search"
+    try:
+        search = requests.get(f"{base_url}?q={player_name}", timeout=15)
+        search.raise_for_status()
+        results = search.json()
+        if len(results) == 0:
+            raise ValueError("Player not found in SportsDataverse.")
+        # pick top match
+        player_id = results[0]["id"]
+        player_url = f"https://sportsdataverse.net/nfl/players/{player_id}_gamelog_2025.json"
+        data = requests.get(player_url, timeout=20)
+        data.raise_for_status()
+        df = pd.DataFrame(data.json()["games"])
+        df = df[df["week"].notna()]
+        df["week"] = df["week"].astype(int)
+        return df, results[0]["name"]
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch data for {player_name}: {e}")
 
 def fetch_weather(city):
-    city = (city or "").strip()
-    if not city:
+    if not city.strip():
         return None, None
     try:
         r = requests.get(OPENWEATHER_URL.format(city=city, key=OPENWEATHER_KEY), timeout=15)
@@ -90,35 +84,36 @@ if st.button("Analyze Player", use_container_width=True):
         st.stop()
 
     try:
-        player_url = find_player_url(player_name)
-        st.info(f"Fetching live data from Pro-Football-Reference …")
-        df = fetch_pfr_data(player_url)
+        st.info("Fetching live 2025 data from SportsDataverse …")
+        df, canonical_name = fetch_player_data(player_name)
     except Exception as e:
-        st.error(f"Failed to load player data: {e}")
+        st.error(str(e))
         st.stop()
 
-    # Map stat column
+    # Select the correct stat column
     stat_map = {
-        "Passing Yards": ["Yds", "PassYds", "Yds.1"],
-        "Rushing Yards": ["RushYds", "Yds.2"],
-        "Receiving Yards": ["RecYds", "Yds.3"]
+        "Passing Yards": ["passing_yards", "pass_yards", "pass_yds"],
+        "Rushing Yards": ["rushing_yards", "rush_yards", "rush_yds"],
+        "Receiving Yards": ["receiving_yards", "rec_yards", "rec_yds"]
     }
     cols = stat_map[stat_type]
     col = next((c for c in cols if c in df.columns), None)
     if not col:
-        st.error("No matching stat column found.")
+        st.error("No matching stat column found in API data.")
         st.stop()
 
     df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    view = df[["Week", col]].rename(columns={col: "value"}).sort_values("Week")
+    view = df[["week", col]].rename(columns={col: "value"}).sort_values("week")
 
     # Chart
-    fig = px.bar(view, x="Week", y="value", text="value",
-                 title=f"{player_name.title()} — {stat_type} (2025 Season)")
+    fig = px.bar(
+        view, x="week", y="value", text="value",
+        title=f"{canonical_name} — {stat_type} (2025 Season)"
+    )
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Probability
+    # Probability outputs
     st.subheader("🎯 Baseline Probability")
     col1, col2 = st.columns(2)
     if col1.button("Over"):
@@ -126,14 +121,16 @@ if st.button("Analyze Player", use_container_width=True):
     if col2.button("Under"):
         st.warning(f"Under Probability: {calc_prob(view['value'], sportsbook_line, 'Under')}%")
 
-    # Adjusted Probability
+    # Weather adjustment
     st.divider()
     st.subheader("📊 Context-Adjusted Probability")
     weather, temp = fetch_weather(weather_city)
     base = calc_prob(view["value"], sportsbook_line, "Over")
     adj = base
-    if weather and "rain" in weather.lower(): adj -= 8
-    if temp and temp < 40: adj -= 5
+    if weather and "rain" in weather.lower():
+        adj -= 8
+    if temp and temp < 40:
+        adj -= 5
     adj = max(0, min(100, adj))
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
     st.success(f"Adjusted Over Probability: {adj}%")
@@ -153,4 +150,4 @@ if st.button("Analyze Player", use_container_width=True):
 
 # ---------------------------------------------------------------------
 st.markdown("---")
-st.caption("Data: Pro-Football-Reference (live scrape) • OpenWeather • Build vA40 (2025)")
+st.caption("Data: SportsDataverse NFL (mirror of Pro-Football-Reference) • OpenWeather • Build vA41 (2025)")
