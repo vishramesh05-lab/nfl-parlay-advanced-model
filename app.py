@@ -1,6 +1,6 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA35
-# Robust: Kaggle + GitHub fallback + Local cache + OpenWeather
-# Author: Vish (2025)
+# NFL Parlay Helper (Dual Probabilities, 2025) — vA36
+# Fixed dataset path (Oct 2025) + probability model
+# Author: Vish
 
 import streamlit as st
 import pandas as pd
@@ -8,16 +8,14 @@ import requests
 import plotly.express as px
 import gzip, io, os, datetime
 
-# -------------------------------------------------------------------------
 st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
                    layout="wide", page_icon="🏈")
 
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
             unsafe_allow_html=True)
-st.caption("Live data + probability model — NFLverse (free mirror) + OpenWeather")
-st.caption("Build vA35 | by Vish")
+st.caption("Live data + probability model — NFLverse (free) + OpenWeather")
+st.caption("Build vA36 | by Vish")
 
-# -------------------------------------------------------------------------
 # Sidebar
 st.sidebar.header("⚙️ Filters")
 current_week = st.sidebar.slider("Current week", 1, 18, 6)
@@ -32,9 +30,9 @@ opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)", "")
 weather_city = st.text_input("Weather City (optional, e.g., Detroit)", "")
 
 # -------------------------------------------------------------------------
-# Data mirrors
-KAGGLE_MIRROR = "https://storage.googleapis.com/kaggle-data-mirror/nflverse/player_stats.csv.gz"
-GITHUB_MIRROR = "https://raw.githubusercontent.com/nflverse/nflverse-data/main/data/players/player_stats.csv.gz"
+# Data sources
+NFLVERSE_PRIMARY = "https://raw.githubusercontent.com/nflverse/nflverse-data/main/data/player_stats_regular_season.csv.gz"
+NFLVERSE_FALLBACK = "https://data.nflverse.com/current/player_stats_regular_season.csv.gz"
 LOCAL_CACHE = "/tmp/player_stats_cache.csv.gz"
 
 OPENWEATHER_KEY = "demo"
@@ -43,20 +41,19 @@ OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appi
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_nfl_data():
-    """Load NFLverse player stats with robust fallback."""
-    mirrors = [KAGGLE_MIRROR, GITHUB_MIRROR]
+    """Load NFLverse player stats with fallback + local cache."""
+    urls = [NFLVERSE_PRIMARY, NFLVERSE_FALLBACK]
     last_err = None
 
-    # try mirrors
-    for url in mirrors:
+    for url in urls:
         try:
             if debug_mode:
-                st.write(f"Trying: {url}")
+                st.write(f"Attempting {url}")
             r = requests.get(url, timeout=30)
             r.raise_for_status()
             with io.BytesIO(r.content) as buf, gzip.open(buf, "rt") as f:
                 df = pd.read_csv(f)
-            df.to_csv(LOCAL_CACHE, index=False, compression="gzip")  # cache locally
+            df.to_csv(LOCAL_CACHE, index=False, compression="gzip")
             if debug_mode:
                 st.write(f"Loaded {len(df)} rows from {url}")
             break
@@ -64,11 +61,10 @@ def load_nfl_data():
             last_err = e
             continue
     else:
-        # fallback to local cache
         if os.path.exists(LOCAL_CACHE):
+            df = pd.read_csv(LOCAL_CACHE, compression="gzip")
             if debug_mode:
                 st.write("Loaded data from local cache.")
-            df = pd.read_csv(LOCAL_CACHE, compression="gzip")
         else:
             raise RuntimeError(f"Failed to load from all mirrors: {last_err}")
 
@@ -128,7 +124,6 @@ if st.button("Analyze Player", use_container_width=True):
         st.error(f"No {stat_type} data for {player_name}.")
         st.stop()
 
-    # Weekly stats
     view = p_df.groupby("week", as_index=False)[stat_col].sum().sort_values("week")
 
     # Chart
@@ -145,7 +140,7 @@ if st.button("Analyze Player", use_container_width=True):
     if col2.button("Under"):
         st.warning(f"Under Probability: {calc_prob(view[stat_col], sportsbook_line, 'Under')}%")
 
-    # Context adjustment
+    # Adjusted probability
     st.divider()
     st.subheader("📊 Context-Adjusted Probability")
     weather, temp = fetch_weather(weather_city)
@@ -154,12 +149,10 @@ if st.button("Analyze Player", use_container_width=True):
     if weather and "rain" in weather.lower(): adj -= 8
     if temp and temp < 40: adj -= 5
     adj = max(0, min(100, adj))
-
-    st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | "
-            f"Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
+    st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {('%.0f' % temp) if temp else 'N/A'} °F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
-    # Season summary
+    # Summary
     st.divider()
     st.subheader("📈 Season Summary")
     stats = {
@@ -174,4 +167,4 @@ if st.button("Analyze Player", use_container_width=True):
     st.caption(f"Last refresh: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 # -------------------------------------------------------------------------
 st.markdown("---")
-st.caption("Data: NFLverse mirrors (Kaggle/GitHub) • OpenWeather • Build vA35 (2025)")
+st.caption("Data: NFLverse (Oct 2025 path) • OpenWeather • Build vA36 (2025)")
