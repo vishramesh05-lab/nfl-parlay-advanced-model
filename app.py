@@ -58,7 +58,7 @@ if st.sidebar.button("🔁 Retrain Now"):
         st.sidebar.warning("No JSON data found in /data folder.")
 
 # periodic background updates
-if utils.should_retrain():
+if utils.maybe_retrain():
     df = utils.merge_jsons(); utils.train_ai(df)
 if utils.should_mini_update():
     pass  # placeholder for 30-min mini-update tasks
