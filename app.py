@@ -7,6 +7,19 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import streamlit as st
+import traceback, sys
+
+def show_startup_errors():
+    try:
+        # Run all your imports and config inside here
+        import pandas as pd, numpy as np, requests
+    except Exception:
+        st.error("App failed to load:")
+        st.code(traceback.format_exc())
+        st.stop()
+
+show_startup_errors()
 from datetime import datetime
 from scipy.stats import beta
 
