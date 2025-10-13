@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd, numpy as np, os, pickle, time
 from datetime import datetime
 import plotly.express as px
-import utils   # helper functions
+import utils  # helper functions
 
 # ----------------- PAGE CONFIG -----------------
 st.set_page_config(page_title="NFL Parleggy Model v70-AI",
