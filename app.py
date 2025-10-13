@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 NFL Parleggy AI Model v71
 Author: Vish (Project Nova Analytics)
