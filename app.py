@@ -50,17 +50,19 @@ h1,h2,h3 {color:#00b0ff;font-weight:600;}
 
 # Auto refresh (every 30 min)
 st_autorefresh = st.experimental_rerun if False else None  # guard for type checkers
-st.experimental_memo.clear()  # no-op safety
-st_autorefresh = st.experimental_rerun  # just to silence linters
+# --- Auto-refresh every 30 minutes (Streamlit 1.37-safe) ---
+# Clear the modern caches (ok if no-op)
+try:
+    st.cache_data.clear()
+    st.cache_resource.clear()
+except Exception:
+    pass
 
-st.experimental_set_query_params()  # keep URL clean
-st_autorefresh = st.autorefresh = st.experimental_singleton if False else None
-st.autorefresh = lambda **kwargs: None  # do nothing unless we call explicitly
-st_autorefresh = st.experimental_rerun  # alias
-
-st_autorefresh_interval_ms = 30 * 60 * 1000
-st.autorefresh(interval=st_autorefresh_interval_ms, key="auto30m")
-
+# Soft page reload in 30 minutes so fresh data is pulled when the cache TTL expires
+st.markdown(
+    "<script>setTimeout(() => { window.location.reload(); }, 1800000);</script>",
+    unsafe_allow_html=True,
+)
 # ---------------------- Sidebar controls ----------------------
 with st.sidebar:
     st.subheader("Controls")
