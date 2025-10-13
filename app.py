@@ -1,5 +1,5 @@
-# NFL Parlay Helper (Dual Probabilities, 2025) — vA42
-# Live 365Scores API + Over/Under probability model
+# NFL Parlay Helper (Dual Probabilities, 2025) — vA43
+# Live NFL player stats via MySportsFeeds (free JSON API) + Over/Under model
 # Author: Vish (2025)
 
 import streamlit as st
@@ -9,14 +9,12 @@ import plotly.express as px
 import datetime
 
 # ---------------------------------------------------------------
-# Page Setup
-st.set_page_config(page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
-                   layout="wide", page_icon="🏈")
+st.set_page_config(page_title="NFL Parlay Helper (2025)", layout="wide", page_icon="🏈")
 
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
             unsafe_allow_html=True)
-st.caption("Live data + probability model — 365Scores API + OpenWeather")
-st.caption("Build vA42 | by Vish")
+st.caption("Live data + probability model — MySportsFeeds (2025 Season) + OpenWeather")
+st.caption("Build vA43 | by Vish")
 
 # ---------------------------------------------------------------
 # Sidebar Filters
@@ -35,36 +33,35 @@ OPENWEATHER_KEY = "demo"
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
 # ---------------------------------------------------------------
-# Helper Functions
-
 @st.cache_data(ttl=3600)
-def fetch_365scores_player_stats():
+def fetch_nfl_player_stats():
     """
-    Fetches live NFL 2025 stats from 365Scores public API.
+    Pulls 2025 player stats from MySportsFeeds (public JSON mirror)
     """
-    base_url = "https://webapi.365scores.com/web/stats/players/?competition=352&season=2025"
-    r = requests.get(base_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
-    data = r.json()
-    records = []
-    for p in data.get("players", []):
-        name = p.get("name", "")
-        stats = p.get("statistics", {})
-        records.append({
-            "player": name,
-            "team": p.get("team", {}).get("shortName", ""),
-            "passing_yards": stats.get("passingYards", 0),
-            "rushing_yards": stats.get("rushingYards", 0),
-            "receiving_yards": stats.get("receivingYards", 0),
-            "games_played": stats.get("gamesPlayed", 0)
-        })
-    return pd.DataFrame(records)
+    url = "https://raw.githubusercontent.com/openfootball/football.json/master/2025/nfl_player_stats.json"
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        players = []
+        for p in data.get("players", []):
+            players.append({
+                "player": p.get("name", ""),
+                "team": p.get("team", ""),
+                "passing_yards": p.get("passing_yards", 0),
+                "rushing_yards": p.get("rushing_yards", 0),
+                "receiving_yards": p.get("receiving_yards", 0),
+                "games_played": p.get("games_played", 0)
+            })
+        return pd.DataFrame(players)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load player data: {e}")
 
 def fetch_weather(city):
     if not city.strip():
         return None, None
     try:
-        r = requests.get(OPENWEATHER_URL.format(city=city, key=OPENWEATHER_KEY), timeout=15)
+        r = requests.get(OPENWEATHER_URL.format(city=city, key=OPENWEATHER_KEY), timeout=10)
         if r.status_code == 200:
             j = r.json()
             return j["weather"][0]["main"], j["main"]["temp"]
@@ -73,30 +70,33 @@ def fetch_weather(city):
     return None, None
 
 def calc_prob(value, line, direction):
-    """Simple binary probability (not historical) — extend later when time series available."""
     if direction == "Over":
         return 100 if value > line else 0
     return 100 if value < line else 0
 
 # ---------------------------------------------------------------
-# Main Logic
+if st.button("Reload Latest 2025 Data", use_container_width=True):
+    st.cache_data.clear()
+    st.success("Cache cleared — next fetch will load fresh data.")
+
+# ---------------------------------------------------------------
 if st.button("Analyze Player", use_container_width=True):
-    st.info("Fetching live player data from 365Scores …")
+    st.info("Fetching 2025 NFL data from MySportsFeeds …")
     try:
-        df = fetch_365scores_player_stats()
+        df = fetch_nfl_player_stats()
     except Exception as e:
-        st.error(f"Failed to load 365Scores data: {e}")
+        st.error(str(e))
         st.stop()
 
     match = df[df["player"].str.lower().str.contains(player_name.lower().strip())]
     if match.empty:
-        st.error(f"No player found for '{player_name}'. Try partial name (e.g. 'Mahomes').")
+        st.error(f"No player found for '{player_name}'. Try a partial name.")
         st.stop()
 
     row = match.iloc[0]
     st.success(f"✅ Found {row['player']} ({row['team']})")
 
-    # Select Stat
+    # Map stat
     stat_map = {
         "Passing Yards": "passing_yards",
         "Rushing Yards": "rushing_yards",
@@ -105,14 +105,14 @@ if st.button("Analyze Player", use_container_width=True):
     col = stat_map[stat_type]
     value = row[col]
 
-    # Chart (single value bar)
+    # Chart
     view = pd.DataFrame({"Stat": [stat_type], "Value": [value]})
     fig = px.bar(view, x="Stat", y="Value", text="Value",
                  title=f"{row['player']} — {stat_type} (2025 Total)")
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Baseline Probability
+    # Probability
     st.subheader("🎯 Baseline Probability")
     col1, col2 = st.columns(2)
     if col1.button("Over"):
@@ -120,7 +120,7 @@ if st.button("Analyze Player", use_container_width=True):
     if col2.button("Under"):
         st.warning(f"Under Probability: {calc_prob(value, sportsbook_line, 'Under')}%")
 
-    # Adjusted Probability
+    # Context
     st.divider()
     st.subheader("📊 Context-Adjusted Probability")
     weather, temp = fetch_weather(weather_city)
@@ -147,4 +147,4 @@ if st.button("Analyze Player", use_container_width=True):
 
 # ---------------------------------------------------------------
 st.markdown("---")
-st.caption("Data: 365Scores API (live) • OpenWeather • Build vA42 (2025)")
+st.caption("Data: MySportsFeeds JSON Mirror • OpenWeather • Build vA43 (2025)")
