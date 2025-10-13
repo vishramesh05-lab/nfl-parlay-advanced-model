@@ -63,7 +63,7 @@ with tab1:
     if data.empty:
         st.warning("No player data found in /data. Upload JSON stats or connect your SportsData.io feed.")
     else:
-        # Fallback-safe player dropdown
+       # Fallback-safe player dropdown
 name_col = None
 for possible in ["Name", "player", "PlayerName", "Player", "full_name"]:
     if possible in data.columns:
@@ -75,6 +75,7 @@ if name_col:
 else:
     st.error("No player name column found in data. Please check your JSON structure.")
     st.stop()
+   
         stat = st.selectbox("Stat Type", ["Passing Yards", "Rushing Yards", "Receiving Yards"])
         line = st.number_input("Sportsbook Line", min_value=0.0, max_value=1000.0, value=250.0)
         dfp = data[data['Name'] == player]
