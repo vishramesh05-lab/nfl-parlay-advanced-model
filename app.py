@@ -1,6 +1,6 @@
 # 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
 # Data: Kaggle Big Data Bowl 2025 + OpenWeather Adjustments
-# Build vA55 | Vishvin Ramesh
+# Build vA56 | Vishvin Ramesh
 
 import streamlit as st
 import pandas as pd
@@ -20,10 +20,9 @@ st.set_page_config(
     layout="wide",
     page_icon="🏈"
 )
-
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025 - Kaggle Edition)</h1>", unsafe_allow_html=True)
 st.caption("Data: Kaggle Big Data Bowl 2025 (Weekly Updates) + OpenWeather Adjustments")
-st.caption("Build vA55 | by Vishvin Ramesh")
+st.caption("Build vA56 | by Vishvin Ramesh")
 
 # ----------------------------------------------------
 # SIDEBAR FILTERS
@@ -45,27 +44,20 @@ weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 # CONSTANTS
 # ----------------------------------------------------
 DATA_FILE = "nfl_2025_player_stats.csv"
-OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")  # add real key to Streamlit Secrets
+OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
 # ----------------------------------------------------
 # UNIVERSAL SAFE READER
 # ----------------------------------------------------
 def safe_read_file(file_like):
-    """
-    Universal CSV/XLS/ZIP reader that handles any Kaggle data format.
-    Auto-detects encoding, decompresses ZIPs, and reads Excel if needed.
-    """
-    import io
-
-    # Try reading CSV directly
+    """Reads CSV, ZIP, or Excel with universal encoding fallback."""
     try:
         return pd.read_csv(file_like, encoding="utf-8-sig")
     except pd.errors.EmptyDataError:
-        st.error("❌ The uploaded file is empty.")
+        st.error("❌ File is empty.")
         return pd.DataFrame()
     except pd.errors.ParserError:
-        # ZIP fallback
         file_like.seek(0)
         if zipfile.is_zipfile(file_like):
             with zipfile.ZipFile(file_like, "r") as z:
@@ -76,29 +68,26 @@ def safe_read_file(file_like):
                 csv_name = csv_files[0]
                 st.info(f"📦 Extracting {csv_name} from ZIP...")
                 with z.open(csv_name) as csv_file:
-                    return pd.read_csv(csv_file, encoding="utf-8", errors="replace")
-        # Excel fallback
+                    return pd.read_csv(csv_file, encoding="utf-8-sig")
         file_like.seek(0)
         try:
             return pd.read_excel(file_like)
         except Exception:
-            pass
-        st.error("⚠️ Could not parse file as CSV, ZIP, or Excel.")
-        return pd.DataFrame()
+            st.error("⚠️ Could not parse as CSV, ZIP, or Excel.")
+            return pd.DataFrame()
     except UnicodeDecodeError:
-        # Encoding fallback
         file_like.seek(0)
         raw = file_like.read(4096)
         enc = chardet.detect(raw).get("encoding", "utf-8")
         file_like.seek(0)
-        return pd.read_csv(file_like, encoding=enc, errors="replace")
+        return pd.read_csv(file_like, encoding=enc)
     except Exception as e:
         st.error(f"Error reading file: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_data(uploaded_file=None):
-    """Load Kaggle data either from upload or local file."""
+    """Loads dataset from upload or default file."""
     try:
         if uploaded_file is not None:
             df = safe_read_file(uploaded_file)
@@ -108,17 +97,16 @@ def load_data(uploaded_file=None):
         df.columns = [c.lower().strip() for c in df.columns]
         return df
     except FileNotFoundError:
-        st.error("⚠️ Dataset not found. Please upload the CSV below.")
+        st.error("⚠️ Dataset not found. Please upload below.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Error loading data: {e}")
         return pd.DataFrame()
 
 # ----------------------------------------------------
-# WEATHER FUNCTION
+# WEATHER
 # ----------------------------------------------------
 def fetch_weather(city):
-    """Fetch weather and temperature (optional)."""
     if not city:
         return None, None
     try:
@@ -131,26 +119,24 @@ def fetch_weather(city):
     return None, None
 
 # ----------------------------------------------------
-# PROBABILITY FUNCTION
+# PROBABILITY
 # ----------------------------------------------------
 def calc_prob(series, line, direction):
-    """Calculate over/under probability."""
     if len(series) == 0:
         return 0.0
     hits = (series > line).sum() if direction == "Over" else (series < line).sum()
     return round(100 * hits / len(series), 1)
 
 # ----------------------------------------------------
-# UPLOAD / RELOAD SECTION
+# UPLOAD & RELOAD
 # ----------------------------------------------------
 uploaded_file = st.file_uploader("📂 Upload Kaggle 2025 CSV or ZIP file", type=["csv", "zip", "xlsx"])
-
 if st.button("🔁 Reload / Refresh Data", use_container_width=True):
     st.cache_data.clear()
-    st.success("✅ Cache cleared. New data will reload automatically!")
+    st.success("✅ Cache cleared. Data will reload automatically!")
 
 # ----------------------------------------------------
-# MAIN ANALYSIS
+# MAIN LOGIC
 # ----------------------------------------------------
 if uploaded_file:
     df = load_data(uploaded_file)
@@ -166,13 +152,15 @@ if st.button("Analyze Player", use_container_width=True):
         st.warning("Please upload a dataset first.")
         st.stop()
 
-    # Match player name
-    matches = df[df["player"].str.contains(player_name, case=False, na=False)] if "player" in df.columns else pd.DataFrame()
+    if "player" not in df.columns:
+        st.error("❌ No 'player' column found in dataset.")
+        st.stop()
+
+    matches = df[df["player"].str.contains(player_name, case=False, na=False)]
     if matches.empty:
         st.warning(f"No data found for '{player_name}'. Try partial name (e.g., 'Mahomes').")
         st.stop()
 
-    # Map stat type
     stat_col_map = {
         "Passing Yards": "passing_yards",
         "Rushing Yards": "rushing_yards",
@@ -183,7 +171,6 @@ if st.button("Analyze Player", use_container_width=True):
         st.error(f"Column '{stat_col}' not found in dataset.")
         st.stop()
 
-    # Subset player’s recent weeks
     player_df = matches[["week", stat_col]].sort_values("week").tail(lookback_weeks)
     player_df.rename(columns={stat_col: "value"}, inplace=True)
 
@@ -204,7 +191,7 @@ if st.button("Analyze Player", use_container_width=True):
     col1.success(f"Over Probability: {over_prob}%")
     col2.warning(f"Under Probability: {under_prob}%")
 
-    # Weather
+    # Weather Adjustment
     weather, temp = fetch_weather(weather_city)
     adj = over_prob
     if weather and "rain" in weather.lower():
@@ -217,4 +204,4 @@ if st.button("Analyze Player", use_container_width=True):
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
-st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA55 | by Vishvin Ramesh")
+st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA56 | by Vishvin Ramesh")
