@@ -1,100 +1,69 @@
-# 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
-# Source: FootballDB (weekly) + OpenWeather
-# Build vA49 | Vishvin Ramesh
+# 🏈 NFL Parlay Helper (Kaggle vA51)
+# Build: Weekly-Updatable Local Dataset Model
+# Source: Kaggle Big Data Bowl 2025 + OpenWeather
+# Author: Vishvin Ramesh
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
 import plotly.express as px
+import requests
+from datetime import datetime
 
-# ---------------------------------------------------------
+# ----------------------------------------------------
 # PAGE CONFIG
-# ---------------------------------------------------------
+# ----------------------------------------------------
 st.set_page_config(
-    page_title="NFL Parlay Helper (Dual Probabilities, 2025)",
-    page_icon="🏈",
-    layout="wide"
+    page_title="NFL Parlay Helper (2025 - Kaggle Edition)",
+    layout="wide",
+    page_icon="🏈"
 )
+st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025 - Kaggle Edition)</h1>", unsafe_allow_html=True)
+st.caption("Data: Kaggle Big Data Bowl 2025 (Weekly) + Optional OpenWeather Adjustments")
+st.caption("Build vA51 | Vishvin Ramesh")
 
-st.markdown(
-    "<h1 style='text-align:center;'>🏈 NFL Parlay Helper (Dual Probabilities, 2025)</h1>",
-    unsafe_allow_html=True
-)
-st.caption("Live data probability model — FootballDB (weekly) + OpenWeather")
-st.caption("Build vA49 | by Vishvin Ramesh")
-
-# ---------------------------------------------------------
+# ----------------------------------------------------
 # SIDEBAR FILTERS
-# ---------------------------------------------------------
+# ----------------------------------------------------
 st.sidebar.header("⚙️ Filters")
-current_week = st.sidebar.slider("Current Week", 1, 18, 6)
+current_week = st.sidebar.slider("Current week", 1, 18, 6)
 lookback_weeks = st.sidebar.slider("Lookback (weeks)", 1, 8, 5)
-debug_mode = st.sidebar.checkbox("Enable Debug Mode", False)
 
-# ---------------------------------------------------------
-# USER INPUTS
-# ---------------------------------------------------------
+# ----------------------------------------------------
+# INPUTS
+# ----------------------------------------------------
 player_name = st.text_input("Player Name", placeholder="e.g. Patrick Mahomes")
 stat_type = st.selectbox("Stat Type", ["Passing Yards", "Rushing Yards", "Receiving Yards"])
 sportsbook_line = st.number_input("Sportsbook Line", step=0.5)
 opponent_team = st.text_input("Opponent Team (e.g., KC, BUF, PHI)")
 weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 
-# ---------------------------------------------------------
+# ----------------------------------------------------
 # CONSTANTS
-# ---------------------------------------------------------
-OPENWEATHER_KEY = "demo"  # replace with your key
+# ----------------------------------------------------
+DATA_FILE = "nfl_2025_player_stats.csv"
+OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
-CACHE_FILE = "footballdb_2025.csv"
 
-# ---------------------------------------------------------
+# ----------------------------------------------------
 # FUNCTIONS
-# ---------------------------------------------------------
+# ----------------------------------------------------
 @st.cache_data(ttl=3600)
-def fetch_footballdb_data():
-    """Scrape weekly player stats from FootballDB (passing/rushing/receiving)."""
-    urls = {
-        "Passing Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=passing",
-        "Rushing Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=rushing",
-        "Receiving Yards": "https://www.footballdb.com/stats/stats.html?lg=NFL&yr=2025&type=reg&cat=receiving"
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/118.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.footballdb.com/"
-    }
-
-    all_data = []
-    for cat, url in urls.items():
-        try:
-            r = requests.get(url, headers=headers, timeout=20)
-            r.raise_for_status()  # raise error if status != 200
-            soup = BeautifulSoup(r.text, "html.parser")
-            table = soup.find("table", {"class": "statistics"})
-            if not table:
-                st.warning(f"No table found for {cat}")
-                continue
-            df = pd.read_html(str(table))[0]
-            df["Category"] = cat
-            all_data.append(df)
-        except Exception as e:
-            st.warning(f"⚠️ Could not load {cat}: {e}")
-            if debug_mode:
-                st.exception(e)
-
-    if not all_data:
-        st.error("⚠️ FootballDB returned no data — site may be blocking requests or temporarily down.")
+def load_kaggle_data():
+    """Load Kaggle NFL player stats from local CSV."""
+    try:
+        df = pd.read_csv(DATA_FILE)
+        df.columns = [c.lower().strip() for c in df.columns]
+        return df
+    except FileNotFoundError:
+        st.error(f"⚠️ File '{DATA_FILE}' not found. Upload it to your app folder.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
         return pd.DataFrame()
 
-    return pd.concat(all_data, ignore_index=True)
 def fetch_weather(city):
-    """Fetch weather and temperature."""
+    """Fetch weather and temperature (optional)."""
     if not city:
         return None, None
     try:
@@ -113,72 +82,70 @@ def calc_prob(series, line, direction):
     hits = (series > line).sum() if direction == "Over" else (series < line).sum()
     return round(100 * hits / len(series), 1)
 
-# ---------------------------------------------------------
-# LOAD DATA
-# ---------------------------------------------------------
-if st.button("🔁 Reload Latest FootballDB Data", use_container_width=True):
+# ----------------------------------------------------
+# RELOAD DATA BUTTON
+# ----------------------------------------------------
+if st.button("🔁 Reload Latest Kaggle Data", use_container_width=True):
     st.cache_data.clear()
-    st.success("Data cache cleared. Click 'Analyze Player' to refresh with latest stats.")
+    st.success("Cache cleared — data will reload fresh on next run.")
 
-st.divider()
-
-# ---------------------------------------------------------
-# MAIN ACTION
-# ---------------------------------------------------------
+# ----------------------------------------------------
+# MAIN ANALYSIS
+# ----------------------------------------------------
 if st.button("Analyze Player", use_container_width=True):
-    st.info("Fetching live weekly stats from FootballDB …")
-    df = fetch_footballdb_data()
-
+    df = load_kaggle_data()
     if df.empty:
-        st.error("⚠️ Failed to load player data from FootballDB.")
-    else:
-        # Normalize player name column (FootballDB uses multiple naming styles)
-        df.columns = [c.strip() for c in df.columns]
-        player_matches = df[df["Player"].str.contains(player_name, case=False, na=False)]
+        st.stop()
 
-        if player_matches.empty:
-            st.warning(f"No data found for '{player_name}'. Try a shorter name fragment (e.g., 'Mahomes').")
-        else:
-            # Select by category
-            stat_df = player_matches[player_matches["Category"] == stat_type]
-            if stat_df.empty:
-                st.warning(f"No {stat_type} data for {player_name}.")
-            else:
-                # Extract numeric yard values
-                if stat_type == "Passing Yards":
-                    values = stat_df["Yards"].astype(float)
-                elif stat_type == "Rushing Yards":
-                    values = stat_df["Yards"].astype(float)
-                else:
-                    values = stat_df["Yards"].astype(float)
+    # Match player by name fragment
+    matches = df[df["player"].str.contains(player_name, case=False, na=False)]
+    if matches.empty:
+        st.warning(f"No data found for '{player_name}'. Try a shorter name fragment.")
+        st.stop()
 
-                # Visualization
-                fig = px.bar(
-                    x=np.arange(len(values)),
-                    y=values,
-                    text=values,
-                    title=f"{player_name} — {stat_type} (Last {lookback_weeks} Games)"
-                )
-                fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
-                st.plotly_chart(fig, use_container_width=True)
+    # Map stat type to column
+    stat_col_map = {
+        "Passing Yards": "passing_yards",
+        "Rushing Yards": "rushing_yards",
+        "Receiving Yards": "receiving_yards"
+    }
 
-                st.subheader("🎯 Baseline Probability")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.success(f"Over Probability: {calc_prob(values, sportsbook_line, 'Over')}%")
-                with col2:
-                    st.warning(f"Under Probability: {calc_prob(values, sportsbook_line, 'Under')}%")
+    stat_col = stat_col_map[stat_type]
+    if stat_col not in df.columns:
+        st.error(f"Column '{stat_col}' not found in dataset.")
+        st.stop()
 
-                # Weather adjustment
-                weather, temp = fetch_weather(weather_city)
-                adj = calc_prob(values, sportsbook_line, "Over")
-                if weather and "rain" in weather.lower():
-                    adj -= 8
-                if temp and temp < 40:
-                    adj -= 5
-                adj = max(0, min(100, adj))
-                st.divider()
-                st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
-                st.success(f"Adjusted Over Probability: {adj}%")
+    player_df = matches[["week", stat_col]].sort_values("week").tail(lookback_weeks)
+    player_df.rename(columns={stat_col: "value"}, inplace=True)
 
-st.caption("Data: FootballDB (weekly, public) | Weather: OpenWeather | Build vA49")
+    # Visualization
+    fig = px.bar(
+        player_df, x="week", y="value", text="value",
+        title=f"{player_name} — {stat_type} (Last {lookback_weeks} weeks)"
+    )
+    fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Probabilities
+    st.subheader("🎯 Probability Model")
+    over_prob = calc_prob(player_df["value"], sportsbook_line, "Over")
+    under_prob = calc_prob(player_df["value"], sportsbook_line, "Under")
+
+    col1, col2 = st.columns(2)
+    col1.success(f"Over Probability: {over_prob}%")
+    col2.warning(f"Under Probability: {under_prob}%")
+
+    # Weather adjustment
+    weather, temp = fetch_weather(weather_city)
+    adj = over_prob
+    if weather and "rain" in weather.lower():
+        adj -= 8
+    if temp and temp < 40:
+        adj -= 5
+    adj = max(0, min(100, adj))
+
+    st.divider()
+    st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
+    st.success(f"Adjusted Over Probability: {adj}%")
+
+st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA51 | Weather: OpenWeather")
