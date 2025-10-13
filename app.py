@@ -1,7 +1,7 @@
 # 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
-# Build vA60 | Vishvin Ramesh
-# Compatible with Kaggle KAFFLW NFL Big Data Bowl format
-# Auto-detects player stats, weather integration, weekly updates
+# Build vA61 | Vishvin Ramesh
+# Kaggle / KAFFLW compatible - simplified + optimized
+# Source: Uploaded 2025 dataset + optional OpenWeather adjustments
 
 import streamlit as st
 import pandas as pd
@@ -15,9 +15,9 @@ import plotly.express as px
 # PAGE CONFIG
 # ----------------------------------------------------
 st.set_page_config(page_title="NFL Parlay Helper (2025)", layout="wide", page_icon="🏈")
-st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025 - KAFFLW Edition)</h1>", unsafe_allow_html=True)
-st.caption("Data: Kaggle Big Data Bowl 2025 (KAFFLW) + Optional OpenWeather Adjustments")
-st.caption("Build vA60 | by Vishvin Ramesh")
+st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025)</h1>", unsafe_allow_html=True)
+st.caption("Data: Kaggle Big Data Bowl / KAFFLW 2025 + Optional OpenWeather Adjustments")
+st.caption("Build vA61 | by Vishvin Ramesh")
 
 # ----------------------------------------------------
 # SIDEBAR FILTERS
@@ -46,6 +46,7 @@ OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appi
 # UNIVERSAL FILE READER
 # ----------------------------------------------------
 def read_any_file(file_like):
+    """Read CSV or ZIP with encoding detection."""
     try:
         if zipfile.is_zipfile(file_like):
             with zipfile.ZipFile(file_like, "r") as z:
@@ -67,6 +68,7 @@ def read_any_file(file_like):
 
 @st.cache_data(ttl=3600)
 def load_data(uploaded_file=None):
+    """Load CSV or ZIP, fallback to default CSV file."""
     try:
         if uploaded_file:
             return read_any_file(uploaded_file)
@@ -102,26 +104,31 @@ def calc_prob(series, line, direction):
     return round(100 * hits / len(series), 1)
 
 # ----------------------------------------------------
-# FILE UPLOAD SECTION
+# FILE UPLOAD + DATA LOAD
 # ----------------------------------------------------
-uploaded_file = st.file_uploader("📂 Upload Updated Kaggle 2025 CSV (optional)", type=["csv", "zip"])
-if st.button("🔁 Reload / Refresh Data", use_container_width=True):
-    st.cache_data.clear()
-    st.success("✅ Cache cleared — data refreshed!")
+uploaded_file = st.file_uploader("📂 Upload Updated 2025 Dataset (CSV or ZIP)", type=["csv", "zip"])
+
+col_a, col_b = st.columns([1, 1])
+with col_a:
+    if st.button("🔁 Reload / Refresh Data", use_container_width=True):
+        st.cache_data.clear()
+        st.success("✅ Cache cleared — reload complete.")
+with col_b:
+    st.caption("Upload once; replace weekly for updates.")
 
 df = load_data(uploaded_file)
 if df.empty:
-    st.warning("⚠️ No data found. Upload a valid KAFFLW or Kaggle CSV.")
+    st.warning("⚠️ No data found. Upload a valid Kaggle / KAFFLW CSV.")
     st.stop()
 
-# Normalize column names
+# Normalize columns
 df.columns = [c.lower().replace(" ", "_") for c in df.columns]
 
 # ----------------------------------------------------
 # MAIN ANALYSIS
 # ----------------------------------------------------
 if st.button("Analyze Player", use_container_width=True):
-    # Identify key columns
+    # Auto-detect common column names
     player_col = next((c for c in df.columns if "player" in c), None)
     week_col = next((c for c in df.columns if "week" in c), None)
     pass_col = next((c for c in df.columns if "pass" in c and "yard" in c), None)
@@ -137,11 +144,7 @@ if st.button("Analyze Player", use_container_width=True):
         st.warning(f"No stats found for '{player_name}'. Try shorter name (e.g., 'Mahomes').")
         st.stop()
 
-    stat_map = {
-        "Passing Yards": pass_col,
-        "Rushing Yards": rush_col,
-        "Receiving Yards": rec_col
-    }
+    stat_map = {"Passing Yards": pass_col, "Rushing Yards": rush_col, "Receiving Yards": rec_col}
     stat_col = stat_map[stat_type]
     if not stat_col:
         st.error(f"❌ No data column found for {stat_type}.")
@@ -150,9 +153,14 @@ if st.button("Analyze Player", use_container_width=True):
     player_df = matches[[week_col, stat_col]].tail(lookback_weeks)
     player_df.columns = ["week", "yards"]
 
-    # Chart
+    if player_df.empty:
+        st.warning("⚠️ Not enough data points for this player/stat.")
+        st.stop()
+
+    # Visualization
     fig = px.bar(player_df, x="week", y="yards", text="yards",
-                 title=f"{player_name} — {stat_type} (Last {lookback_weeks} Weeks)")
+                 title=f"{player_name} — {stat_type} (Last {lookback_weeks} Weeks)",
+                 labels={"yards": "Yards", "week": "Week"})
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -164,7 +172,7 @@ if st.button("Analyze Player", use_container_width=True):
     col1.success(f"Over Probability: {over_prob}%")
     col2.warning(f"Under Probability: {under_prob}%")
 
-    # Weather adjustment
+    # Weather adjustments
     weather, temp = fetch_weather(weather_city)
     adj = over_prob
     if weather and "rain" in weather.lower():
@@ -177,4 +185,4 @@ if st.button("Analyze Player", use_container_width=True):
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
-st.caption("Data: Kaggle Big Data Bowl 2025 (KAFFLW) | Build vA60 | Vishvin Ramesh")
+st.caption("📊 Data: 2025 KAFFLW / Kaggle | Build vA61 | Vishvin Ramesh")
