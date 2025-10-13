@@ -1,14 +1,16 @@
 # 🏈 NFL Parlay Helper (Dual Probabilities, 2025)
-# Data: Kaggle Big Data Bowl 2025 + Optional OpenWeather Adjustments
-# Build vA54 | Vishvin Ramesh
+# Data: Kaggle Big Data Bowl 2025 + OpenWeather Adjustments
+# Build vA55 | Vishvin Ramesh
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import requests
+import zipfile
 import chardet
 from datetime import datetime
+import io
 
 # ----------------------------------------------------
 # PAGE CONFIG
@@ -18,9 +20,10 @@ st.set_page_config(
     layout="wide",
     page_icon="🏈"
 )
+
 st.markdown("<h1 style='text-align:center;'>🏈 NFL Parlay Helper (2025 - Kaggle Edition)</h1>", unsafe_allow_html=True)
 st.caption("Data: Kaggle Big Data Bowl 2025 (Weekly Updates) + OpenWeather Adjustments")
-st.caption("Build vA54 | by Vishvin Ramesh")
+st.caption("Build vA55 | by Vishvin Ramesh")
 
 # ----------------------------------------------------
 # SIDEBAR FILTERS
@@ -42,46 +45,66 @@ weather_city = st.text_input("Weather City (optional, e.g., Detroit)")
 # CONSTANTS
 # ----------------------------------------------------
 DATA_FILE = "nfl_2025_player_stats.csv"
-OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")  # Add to Streamlit Secrets if available
+OPENWEATHER_KEY = st.secrets.get("OPENWEATHER_KEY", "demo")  # add real key to Streamlit Secrets
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather?q={city}&appid={key}&units=imperial"
 
 # ----------------------------------------------------
-# FUNCTIONS
+# UNIVERSAL SAFE READER
 # ----------------------------------------------------
-def safe_read_csv(file_like):
+def safe_read_file(file_like):
     """
-    Universal CSV reader that auto-detects and gracefully handles encoding.
-    Works with UTF-8, Latin1, UTF-16, and Windows-1252.
+    Universal CSV/XLS/ZIP reader that handles any Kaggle data format.
+    Auto-detects encoding, decompresses ZIPs, and reads Excel if needed.
     """
+    import io
+
+    # Try reading CSV directly
     try:
-        # Try UTF-8 first
         return pd.read_csv(file_like, encoding="utf-8-sig")
-    except UnicodeDecodeError:
+    except pd.errors.EmptyDataError:
+        st.error("❌ The uploaded file is empty.")
+        return pd.DataFrame()
+    except pd.errors.ParserError:
+        # ZIP fallback
+        file_like.seek(0)
+        if zipfile.is_zipfile(file_like):
+            with zipfile.ZipFile(file_like, "r") as z:
+                csv_files = [n for n in z.namelist() if n.endswith(".csv")]
+                if not csv_files:
+                    st.error("⚠️ ZIP found but no CSV inside.")
+                    return pd.DataFrame()
+                csv_name = csv_files[0]
+                st.info(f"📦 Extracting {csv_name} from ZIP...")
+                with z.open(csv_name) as csv_file:
+                    return pd.read_csv(csv_file, encoding="utf-8", errors="replace")
+        # Excel fallback
+        file_like.seek(0)
         try:
-            # Try Latin-1 (Windows default)
-            return pd.read_csv(file_like, encoding="latin1")
-        except UnicodeDecodeError:
-            # Detect best guess with chardet
-            file_like.seek(0)
-            raw_data = file_like.read(4096)
-            encoding_guess = chardet.detect(raw_data).get("encoding", "utf-8")
-            file_like.seek(0)
-            try:
-                return pd.read_csv(file_like, encoding=encoding_guess, errors="replace")
-            except Exception:
-                # Last resort binary decode
-                file_like.seek(0)
-                return pd.read_csv(file_like, encoding="utf-8", errors="replace")
+            return pd.read_excel(file_like)
+        except Exception:
+            pass
+        st.error("⚠️ Could not parse file as CSV, ZIP, or Excel.")
+        return pd.DataFrame()
+    except UnicodeDecodeError:
+        # Encoding fallback
+        file_like.seek(0)
+        raw = file_like.read(4096)
+        enc = chardet.detect(raw).get("encoding", "utf-8")
+        file_like.seek(0)
+        return pd.read_csv(file_like, encoding=enc, errors="replace")
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_data(uploaded_file=None):
     """Load Kaggle data either from upload or local file."""
     try:
         if uploaded_file is not None:
-            df = safe_read_csv(uploaded_file)
+            df = safe_read_file(uploaded_file)
         else:
             with open(DATA_FILE, "rb") as f:
-                df = safe_read_csv(f)
+                df = safe_read_file(f)
         df.columns = [c.lower().strip() for c in df.columns]
         return df
     except FileNotFoundError:
@@ -91,6 +114,9 @@ def load_data(uploaded_file=None):
         st.error(f"❌ Error loading data: {e}")
         return pd.DataFrame()
 
+# ----------------------------------------------------
+# WEATHER FUNCTION
+# ----------------------------------------------------
 def fetch_weather(city):
     """Fetch weather and temperature (optional)."""
     if not city:
@@ -104,6 +130,9 @@ def fetch_weather(city):
         pass
     return None, None
 
+# ----------------------------------------------------
+# PROBABILITY FUNCTION
+# ----------------------------------------------------
 def calc_prob(series, line, direction):
     """Calculate over/under probability."""
     if len(series) == 0:
@@ -112,24 +141,33 @@ def calc_prob(series, line, direction):
     return round(100 * hits / len(series), 1)
 
 # ----------------------------------------------------
-# DATA UPLOAD / RELOAD
+# UPLOAD / RELOAD SECTION
 # ----------------------------------------------------
-uploaded_file = st.file_uploader("📂 Upload Kaggle 2025 CSV (optional)", type=["csv"])
+uploaded_file = st.file_uploader("📂 Upload Kaggle 2025 CSV or ZIP file", type=["csv", "zip", "xlsx"])
 
 if st.button("🔁 Reload / Refresh Data", use_container_width=True):
     st.cache_data.clear()
-    st.success("✅ Cache cleared. Data will reload automatically.")
+    st.success("✅ Cache cleared. New data will reload automatically!")
 
 # ----------------------------------------------------
 # MAIN ANALYSIS
 # ----------------------------------------------------
+if uploaded_file:
+    df = load_data(uploaded_file)
+    if not df.empty:
+        st.success("✅ Data loaded successfully!")
+        st.dataframe(df.head(10), use_container_width=True)
+    else:
+        st.stop()
+
 if st.button("Analyze Player", use_container_width=True):
     df = load_data(uploaded_file)
     if df.empty:
+        st.warning("Please upload a dataset first.")
         st.stop()
 
     # Match player name
-    matches = df[df["player"].str.contains(player_name, case=False, na=False)]
+    matches = df[df["player"].str.contains(player_name, case=False, na=False)] if "player" in df.columns else pd.DataFrame()
     if matches.empty:
         st.warning(f"No data found for '{player_name}'. Try partial name (e.g., 'Mahomes').")
         st.stop()
@@ -149,7 +187,7 @@ if st.button("Analyze Player", use_container_width=True):
     player_df = matches[["week", stat_col]].sort_values("week").tail(lookback_weeks)
     player_df.rename(columns={stat_col: "value"}, inplace=True)
 
-    # Chart
+    # Plot
     fig = px.bar(
         player_df, x="week", y="value", text="value",
         title=f"{player_name} — {stat_type} (Last {lookback_weeks} weeks)"
@@ -157,7 +195,7 @@ if st.button("Analyze Player", use_container_width=True):
     fig.add_hline(y=sportsbook_line, line_color="red", annotation_text="Sportsbook Line")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Probability metrics
+    # Probabilities
     st.subheader("🎯 Probability Model")
     over_prob = calc_prob(player_df["value"], sportsbook_line, "Over")
     under_prob = calc_prob(player_df["value"], sportsbook_line, "Under")
@@ -179,4 +217,4 @@ if st.button("Analyze Player", use_container_width=True):
     st.info(f"Opponent: {opponent_team or 'N/A'} | Weather: {weather or 'N/A'} | Temp: {temp or 'N/A'}°F")
     st.success(f"Adjusted Over Probability: {adj}%")
 
-st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA54 | by Vishvin Ramesh")
+st.caption("Data: Kaggle Big Data Bowl 2025 | Build vA55 | by Vishvin Ramesh")
