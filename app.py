@@ -1,14 +1,15 @@
 """
-NFL Parleggy AI Model v2.0
+NFL Parleggy AI Model v3.0
 Author: Vish (Project Nova Analytics)
-AI-powered NFL Parlay & Player Probability Engine
+AI-powered player & parlay prediction system with visualization
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import time, traceback
-import utils   # <- our helper / AI logic module
+import traceback
+import plotly.express as px
+import utils  # our AI logic + retrain functions
 
 # =======================================================
 # PAGE CONFIGURATION
@@ -20,7 +21,7 @@ st.set_page_config(
 )
 
 # =======================================================
-# PAGE STYLE (Dark Professional)
+# PAGE STYLE (Dark + Professional)
 # =======================================================
 st.markdown("""
 <style>
@@ -42,21 +43,50 @@ st.title("🏈 NFL Parleggy AI Model")
 st.caption("AI-driven probability engine • Auto-updates every 30 min & re-trains nightly 12 AM EST")
 
 # =======================================================
-# MODEL STATUS + RETRAIN
+# SIDEBAR CONTROLS
 # =======================================================
 with st.sidebar:
     st.header("⚙️ Controls")
-    if st.button("🔄 Retrain Now"):
-        with st.spinner("Retraining AI Model..."):
+
+    if st.button("🔄 Retrain AI Model"):
+        with st.spinner("Retraining model..."):
             try:
                 utils.retrain_ai()
-                st.success("✅ AI Model retrained successfully!")
+                st.success("✅ Model retrained successfully!")
             except Exception as e:
                 st.error(f"Retrain failed:\n{e}")
-    st.write(f"**Last Retrain:** {utils.get_last_retrain_time()}")
-    st.caption("Model auto-re-trains every 30 minutes or 12 AM EST")
 
-# Try auto retrain check silently
+    st.write(f"**Last Retrain:** {utils.get_last_retrain_time()}")
+    st.caption("Auto retrains every 30 minutes or nightly at 12 AM EST.")
+
+    st.divider()
+    st.subheader("📈 AI Training Performance")
+
+    try:
+        log_df = utils.get_training_log()
+        if not log_df.empty:
+            fig = px.line(
+                log_df,
+                x="timestamp",
+                y="mae",
+                markers=True,
+                title="Model Mean Absolute Error (MAE) Over Time",
+                labels={"mae": "Mean Absolute Error", "timestamp": "Retrain Timestamp"}
+            )
+            fig.update_layout(
+                plot_bgcolor="#0F1117",
+                paper_bgcolor="#0F1117",
+                font=dict(color="#e8e8e8"),
+                title_font=dict(size=16)
+            )
+            fig.update_traces(line_color="#00aeff")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("No training records yet — retrain to log data.")
+    except Exception as e:
+        st.caption(f"Error loading training log: {e}")
+
+# Background retrain check
 try:
     utils.maybe_retrain()
 except Exception:
@@ -82,9 +112,7 @@ with tab1:
         opponent = st.text_input("Opponent Team (e.g., KC, BUF, PHI)", "")
         city = st.text_input("Weather City (optional, e.g., Detroit)", "")
 
-    analyze = st.button("🔍 Analyze Player")
-
-    if analyze:
+    if st.button("🔍 Analyze Player"):
         with st.spinner(f"Analyzing {player} performance..."):
             try:
                 df = utils.fetch_player_data(player, stat_type)
@@ -94,13 +122,12 @@ with tab1:
                 else:
                     avg, over, under = utils.calculate_probabilities(df, sportsbook_line)
 
-                # Display results
                 colA, colB, colC = st.columns(3)
                 colA.metric("Predicted Average", f"{avg:.1f}")
                 colB.metric("Over Probability", f"{over:.1f}%")
                 colC.metric("Under Probability", f"{under:.1f}%")
 
-                st.success(f"✅ AI Estimate complete for {player}")
+                st.success(f"✅ AI analysis complete for {player}")
             except Exception as e:
                 st.error(f"Error analyzing player:\n{traceback.format_exc()}")
 
@@ -125,6 +152,6 @@ with tab2:
 # FOOTER
 # =======================================================
 st.markdown(
-    "<p class='footer'>© 2025 Project Nova Analytics | AI Model v2.0 | Trained with XGBoost</p>",
+    "<p class='footer'>© 2025 Project Nova Analytics | AI Model v3.0 | Trained with XGBoost</p>",
     unsafe_allow_html=True
 )
