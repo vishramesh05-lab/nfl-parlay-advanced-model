@@ -18,6 +18,13 @@ import utils  # helper functions
 st.set_page_config(page_title="NFL Parleggy Model v70-AI",
                    layout="wide",
                    initial_sidebar_state="expanded")
+# =========================
+# LOADING ANIMATION / STARTUP MESSAGE
+# =========================
+with st.spinner("⚙️ Initializing NFL Parleggy AI Engine..."):
+    time.sleep(2.5)  # short delay for animation
+st.success("✅ NFL Parleggy AI Engine ready to analyze player and parlay probabilities!")
+st.markdown("---")
 
 # ----------------- STYLE -----------------
 st.markdown("""
