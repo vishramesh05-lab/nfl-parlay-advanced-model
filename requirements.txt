@@ -3,4 +3,4 @@ pandas
 numpy
 plotly
 requests
-kaggle
+chardet
