@@ -1,197 +1,184 @@
-# -*- coding: utf-8 -*-
-# NFL Parleggy AI Model – Live JSON ➜ Features ➜ Probabilities ➜ Parlays
-# Author: Vish (Project Nova Analytics)
-#
-# Notes:
-#  - Reads all *.json files in ./data (repo_root/data)
-#  - Caches merged data for 30 min
-#  - Two tabs:
-#      (1) Player Probability Model (single leg)
-#      (2) Parlay Probability Model (multi-leg)
-#  - Nightly “retrain” bookkeeping @ 12:00 AM EST
-#  - Robust column detection for typical SportsDataIO variations
-
-import os, json, math, time
-from datetime import datetime, timezone
-import numpy as np
-import pandas as pd
-import plotly.express as px
 import streamlit as st
-import utils  # local helper module
-import os
-# ...
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-# ============ PAGE CONFIG ============
-st.set_page_config(
-    page_title="NFL Parleggy AI Model",
-    layout="wide",
-    initial_sidebar_state="expanded"
+import pandas as pd
+import numpy as np
+from utilities import (
+    TRAINABLE_TARGETS,
+    parse_and_validate_schema,
+    train_model,
+    predict_for_upcoming,
+    american_to_implied_prob,
+    VERSION_STRING,
 )
 
-# ============ STYLE ============
-st.markdown("""
-<style>
-body {background:#0f1117;color:#e8eaf6;font-family:Inter,system-ui,Segoe UI;}
-h1,h2,h3 {color:#00b4ff;font-weight:600;}
-.card{background:#111b2e;border:1px solid #14244a;border-radius:10px;
-      padding:0.8rem 1rem;margin:0.4rem 0;}
-.badge{display:inline-block;border-radius:6px;padding:3px 7px;font-size:12px;margin-right:6px}
-.badge.green{background:#0e4b2e;color:#b9f3d0}
-.badge.red{background:#3b151a;color:#ffc9c9}
-.badge.yellow{background:#45370c;color:#fff59d}
-.metric{font-size:34px;font-weight:700;color:#eaffff}
-.metric-sub{font-size:12px;color:#9fb0c0}
-.footer{color:#889;font-size:12px;text-align:center;margin-top:18px;}
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="Team Odds Model – Moneyline / ATS / Totals", layout="wide")
 
-# ============ SIDEBAR ============
-with st.sidebar:
-    st.subheader("Controls")
-    if st.button("🔄 Retrain Now (All Markets)", use_container_width=True):
-        st.session_state["last_retrain_utc"] = datetime.now(timezone.utc)
-        st.cache_data.clear()
-        st.success("Caches cleared — will reload JSON data on next run.")
-    if "last_retrain_utc" in st.session_state:
-        st.caption("**Last Retrain:** " +
-                   st.session_state["last_retrain_utc"].strftime("%b %d %Y %H:%M UTC"))
-    else:
-        st.caption("**Last Retrain:** never")
-    st.caption("Auto-refresh every 30 min • Full retrain nightly @ 12:00 AM EST")
+# ===== Sidebar =====
+st.sidebar.title("Team Odds Predictor")
+st.sidebar.caption(VERSION_STRING)
 
-# ============ DATA LOAD ============
-@st.cache_data(ttl=1800, show_spinner=False)
-def _load_all():
-    # read + normalize
-    df_raw = utils.load_all_jsons(DATA_DIR)
-    df = utils.standardize_columns(df_raw)
-    return df
+st.sidebar.markdown("### 1) Upload data")
+hist_file = st.sidebar.file_uploader("Historical games CSV (for training)", type=["csv"])
+future_file = st.sidebar.file_uploader("Upcoming games CSV (for predictions)", type=["csv"])
 
-def _load_data_ready():
-    return _load_all()
+st.sidebar.markdown("### 2) Choose targets")
+targets = st.sidebar.multiselect(
+    "Select prediction targets",
+    TRAINABLE_TARGETS,
+    default=TRAINABLE_TARGETS,  # ["moneyline","spread","over_under"]
+)
 
-# later where you currently do:
-# data = _load_all_jsons()
-# replace with:
-data = _load_data_ready()
-st.title("🏈 NFL Parleggy AI Model")
-st.caption("Live JSON → Feature Engine → Probabilities → Parlay Calculator")
+st.sidebar.markdown("### 3) Model / CV")
+model_type = st.sidebar.selectbox("Model type", ["log_reg", "random_forest", "gbm"])
+cv_folds = st.sidebar.slider("Cross-validation folds", 3, 10, 5)
+calibrate = st.sidebar.checkbox("Calibrate probabilities (Platt scaling)", value=True)
 
-tab1, tab2 = st.tabs(["Player Probability Model", "Parlay Probability Model"])
+st.sidebar.markdown("### 4) Odds settings (optional but recommended)")
+st.sidebar.caption(
+    "If your upcoming CSV includes American odds columns, the app will compute implied probability and EV."
+)
 
-# ============ TAB 1 — Player Probability ============
-with tab1:
-    if data.empty:
-        st.error("No JSON data found — add weekly player files to /data.")
-        st.stop()
+st.sidebar.divider()
+st.sidebar.markdown("**Notes / Tips**")
+st.sidebar.info(
+    "- Targets expected in historical data:\n"
+    "  - moneyline: `result_home_win` ∈ {0,1}\n"
+    "  - spread (ATS): `result_home_cover` ∈ {0,1}\n"
+    "  - over_under: `result_over` ∈ {0,1}\n\n"
+    "- Odds columns in upcoming data (optional):\n"
+    "  - `home_ml`, `away_ml` (American odds)\n"
+    "  - `spread` (float, e.g., -3.5 means home favored), `home_spread_odds`, `away_spread_odds`\n"
+    "  - `total` (game total), `over_odds`, `under_odds`"
+)
 
-    name_col = utils.detect_name_column(data)
-    players = sorted(data[name_col].dropna().unique().tolist())
+st.title("🏈 Team Odds Model — Moneyline / ATS / Over–Under")
+st.caption("Upload data → train → get probabilities, recommended picks, and expected value (EV).")
 
-    colA, colB, colC, colD = st.columns([1.2, 1.0, 0.9, 1.1])
-    with colA:
-        player = st.selectbox("Player", players)
-    with colB:
-        market = st.selectbox("Pick Type / Market", list(utils.MARKET_KEYWORDS.keys()))
-    with colC:
-        sportsbook_line = st.number_input("Sportsbook Line", value=50.0, step=0.5)
-    with colD:
-        lookback = st.slider("Lookback (weeks)", 1, 8, value=5)
+# ===== Body =====
+if not hist_file:
+    st.warning("Upload a **Historical games CSV** to begin.")
+    st.stop()
 
-    opp = st.text_input("Opponent (e.g., KC, BUF, PHI)", "")
-    run = st.button("Analyze Player", type="primary")
+try:
+    df_hist_raw = pd.read_csv(hist_file)
+except Exception as e:
+    st.error(f"Could not read historical CSV: {e}")
+    st.stop()
 
-    if run:
-        dfp = data[data[name_col].astype(str) == str(player)].copy()
-        opp_col = utils.detect_opp_column(dfp)
-        if opp and opp_col in dfp.columns:
-            dfp = dfp[dfp[opp_col].astype(str).str.contains(opp, case=False, na=False)]
+with st.expander("Preview: Historical data (first 20 rows)"):
+    st.dataframe(df_hist_raw.head(20), use_container_width=True)
 
-        week_col = utils.detect_week_column(dfp)
-        if week_col: dfp = dfp.sort_values(week_col, ascending=False)
-        df_recent = dfp.head(lookback).copy()
+# Validate / split features & targets from historical data
+parsed = parse_and_validate_schema(df_hist_raw, expected_targets=targets)
+if parsed.errors:
+    st.error("Schema issues found in the historical CSV:")
+    for err in parsed.errors:
+        st.write(f"• {err}")
+    st.stop()
 
-        target_col = utils.find_target_column(data, market)
-        if not target_col or target_col not in df_recent.columns:
-            st.error(f"Could not find stat column for {market}.")
-            st.stop()
+st.success("Historical data looks good.")
 
-        vals = pd.to_numeric(df_recent[target_col], errors="coerce").dropna().to_numpy()
-        mean_pred = np.mean(vals) if len(vals) else float("nan")
-        p_over = utils.normal_over_probability(vals, sportsbook_line)
-        p_under = 1 - p_over if not math.isnan(p_over) else float("nan")
-        conf = utils.confidence_score(vals)
+# Train one model per target
+trained_models = {}
+metrics_blocks = []
+train_button = st.button("🚀 Train Models", type="primary", use_container_width=True)
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Predicted Mean", f"{mean_pred:,.1f}")
-        m2.metric("Over Probability", f"{p_over*100:.1f} %")
-        m3.metric("Under Probability", f"{p_under*100:.1f} %")
+if train_button:
+    with st.spinner("Training models…"):
+        for target in targets:
+            model_obj = train_model(
+                df_hist_raw,
+                target=target,
+                model_type=model_type,
+                cv_folds=cv_folds,
+                calibrate=calibrate,
+            )
+            trained_models[target] = model_obj
+            metrics_blocks.append((target, model_obj["metrics"]))
 
-        color = "red" if conf < 0.45 else "yellow" if conf < 0.75 else "green"
-        level = "Low" if conf < 0.45 else "Moderate" if conf < 0.75 else "High"
-        st.markdown(
-            f'<div class="card"><span class="badge {color}">{level} Confidence</span>'
-            f'<span class="metric-sub"> Model confidence: {conf*100:.1f}% • Samples: {len(vals)}</span></div>',
-            unsafe_allow_html=True
+    st.success("Models trained.")
+
+    cols = st.columns(len(metrics_blocks)) if metrics_blocks else [st]
+    for i, (target, m) in enumerate(metrics_blocks):
+        with cols[i]:
+            st.markdown(f"### Metrics — **{target}**")
+            st.json(m, expanded=False)
+
+# Predict (if both trained and upcoming present)
+if not future_file:
+    st.info("Upload an **Upcoming games CSV** to generate predictions and EV.")
+    st.stop()
+
+try:
+    df_future_raw = pd.read_csv(future_file)
+except Exception as e:
+    st.error(f"Could not read upcoming CSV: {e}")
+    st.stop()
+
+with st.expander("Preview: Upcoming games data (first 20 rows)"):
+    st.dataframe(df_future_raw.head(20), use_container_width=True)
+
+if not trained_models:
+    st.warning("Train your models first, then re-run predictions.")
+    st.stop()
+
+predict_button = st.button("📈 Predict Upcoming Games", type="secondary", use_container_width=True)
+
+if predict_button:
+    all_outputs = []
+    with st.spinner("Scoring upcoming games…"):
+        for target in targets:
+            res_df = predict_for_upcoming(trained_models[target], df_future_raw.copy(), target)
+            res_df.insert(0, "target", target)
+            all_outputs.append(res_df)
+
+    if all_outputs:
+        results_df = pd.concat(all_outputs, ignore_index=True)
+
+        # Order columns nicely if present
+        preferred_cols = [
+            "target",
+            "game_id",
+            "game_date",
+            "home_team",
+            "away_team",
+            "prediction_side",
+            "model_prob",
+            "book_implied_prob",
+            "edge",
+            "ev_per_$100",
+            # moneyline / spread / total odds:
+            "home_ml", "away_ml",
+            "spread", "home_spread_odds", "away_spread_odds",
+            "total", "over_odds", "under_odds",
+        ]
+        exist_cols = [c for c in preferred_cols if c in results_df.columns]
+        other_cols = [c for c in results_df.columns if c not in exist_cols]
+        results_df = results_df[exist_cols + other_cols]
+
+        st.markdown("## Results")
+        st.dataframe(results_df, use_container_width=True)
+
+        # Download
+        csv = results_df.to_csv(index=False)
+        st.download_button(
+            "💾 Download Predictions CSV",
+            data=csv,
+            file_name="team_odds_predictions.csv",
+            mime="text/csv",
+            use_container_width=True,
         )
 
-        st.subheader("Recent Weeks (table)")
-        show_cols = [name_col, week_col, opp_col, target_col]
-        show_cols = [c for c in show_cols if c in df_recent.columns]
-        st.dataframe(df_recent[show_cols], use_container_width=True)
-
-        st.subheader("Market Distribution Preview")
-        if len(vals):
-            fig = px.histogram(pd.DataFrame({"Value": vals}),
-                               x="Value", nbins=20,
-                               title=f"{player} – {market}")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Not enough data for distribution plot.")
-
-# ============ TAB 2 — Parlay Probability ============
-with tab2:
-    if data.empty:
-        st.info("No JSON data available yet.")
-    else:
-        name_col = utils.detect_name_column(data)
-        players = sorted(data[name_col].dropna().unique().tolist())
-        markets = list(utils.MARKET_KEYWORDS.keys())
-
-        st.write("Build up to 4 legs (assuming independence).")
-        legs = []
-        for i in range(1, 5):
-            with st.expander(f"Leg {i}", expanded=(i == 1)):
-                c1, c2, c3, c4 = st.columns(4)
-                p = c1.selectbox("Player", players, key=f"p{i}")
-                m = c2.selectbox("Market", markets, key=f"m{i}")
-                l = c3.number_input("Line", value=50.0, step=0.5, key=f"l{i}")
-                w = c4.slider("Lookback", 1, 8, value=5, key=f"w{i}")
-                legs.append((p, m, l, w))
-
-        if st.button("Compute Parlay Probability", type="primary"):
-            joint = 1.0
-            leg_info = []
-            for p, m, l, w in legs:
-                if not p: continue
-                col = utils.find_target_column(data, m)
-                dfp = data[data[name_col] == p].copy()
-                wk = utils.detect_week_column(dfp)
-                if wk: dfp = dfp.sort_values(wk, ascending=False)
-                dfp = dfp.head(w)
-                vals = pd.to_numeric(dfp[col], errors="coerce").dropna().to_numpy()
-                pov = utils.normal_over_probability(vals, l)
-                leg_info.append((p, m, pov))
-                if not math.isnan(pov): joint *= pov
-
-            df_show = pd.DataFrame(leg_info, columns=["Player", "Market", "Over Prob"])
-            st.dataframe(df_show, use_container_width=True)
-            if len(leg_info):
-                st.success(f"Joint Over Probability: **{joint*100:.2f}%**")
-
-# ============ FOOTER ============
-st.markdown(
-    f'<div class="footer">Auto-refresh every 30 min • Last update '
-    f'{datetime.now(timezone.utc).strftime("%b %d %Y %H:%M UTC")} • © 2025 Project Nova Analytics</div>',
-    unsafe_allow_html=True
-)
+        # Quick EV summary by target
+        st.markdown("### 📊 EV Summary (Top opportunities)")
+        for t in targets:
+            sub = results_df[results_df["target"] == t].copy()
+            if "ev_per_$100" in sub.columns and not sub.empty:
+                st.markdown(f"**{t}** — top edges")
+                show = sub.sort_values("ev_per_$100", ascending=False).head(10)
+                st.dataframe(show[[
+                    c for c in ["game_date", "home_team", "away_team", "prediction_side",
+                                "model_prob", "book_implied_prob", "edge", "ev_per_$100"]
+                    if c in show.columns
+                ]], use_container_width=True)
+            else:
+                st.caption(f"{t}: no odds present to compute EV.")
