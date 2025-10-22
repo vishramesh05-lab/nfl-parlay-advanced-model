@@ -1,102 +1,184 @@
-import os, json, math
-import numpy as np
+import streamlit as st
 import pandas as pd
+import numpy as np
+from utilities import (
+    TRAINABLE_TARGETS,
+    parse_and_validate_schema,
+    train_model,
+    predict_for_upcoming,
+    american_to_implied_prob,
+    VERSION_STRING,
+)
 
-# --- Market keyword mapping ---
-MARKET_KEYWORDS = {
-    "Passing Yards": [["pass"], ["yd"]],
-    "Rushing Yards": [["rush"], ["yd"]],
-    "Receiving Yards": [["receiv"], ["yd"]],
-    "Receptions": [["rec"], []],
-    "Completions": [["comp"], []],
-    "Pass Attempts": [["att","pass"], []],
-    "Carries": [["rush","att"], []],
-    "Passing TDs": [["pass"], ["td","touch"]],
-    "Rushing TDs": [["rush"], ["td","touch"]],
-    "Receiving TDs": [["receiv"], ["td","touch"]],
-}
+st.set_page_config(page_title="Team Odds Model – Moneyline / ATS / Totals", layout="wide")
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data")
+# ===== Sidebar =====
+st.sidebar.title("Team Odds Predictor")
+st.sidebar.caption(VERSION_STRING)
 
-def _list_week_files(path: str):
-    return sorted(f for f in os.listdir(path) if f.lower().endswith(".json"))
+st.sidebar.markdown("### 1) Upload data")
+hist_file = st.sidebar.file_uploader("Historical games CSV (for training)", type=["csv"])
+future_file = st.sidebar.file_uploader("Upcoming games CSV (for predictions)", type=["csv"])
 
-def load_all_jsons() -> pd.DataFrame:
-    frames = []
-    for fname in _list_week_files(DATA_PATH):
-        fpath = os.path.join(DATA_PATH, fname)
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                js = json.load(f)
-        except Exception:
-            continue
-        if isinstance(js, list):
-            df = pd.json_normalize(js)
-        elif isinstance(js, dict):
-            for key in ("Players","players","data","Data","Items"):
-                if key in js and isinstance(js[key], list):
-                    df = pd.json_normalize(js[key]); break
+st.sidebar.markdown("### 2) Choose targets")
+targets = st.sidebar.multiselect(
+    "Select prediction targets",
+    TRAINABLE_TARGETS,
+    default=TRAINABLE_TARGETS,  # ["moneyline","spread","over_under"]
+)
+
+st.sidebar.markdown("### 3) Model / CV")
+model_type = st.sidebar.selectbox("Model type", ["log_reg", "random_forest", "gbm"])
+cv_folds = st.sidebar.slider("Cross-validation folds", 3, 10, 5)
+calibrate = st.sidebar.checkbox("Calibrate probabilities (Platt scaling)", value=True)
+
+st.sidebar.markdown("### 4) Odds settings (optional but recommended)")
+st.sidebar.caption(
+    "If your upcoming CSV includes American odds columns, the app will compute implied probability and EV."
+)
+
+st.sidebar.divider()
+st.sidebar.markdown("**Notes / Tips**")
+st.sidebar.info(
+    "- Targets expected in historical data:\n"
+    "  - moneyline: `result_home_win` ∈ {0,1}\n"
+    "  - spread (ATS): `result_home_cover` ∈ {0,1}\n"
+    "  - over_under: `result_over` ∈ {0,1}\n\n"
+    "- Odds columns in upcoming data (optional):\n"
+    "  - `home_ml`, `away_ml` (American odds)\n"
+    "  - `spread` (float, e.g., -3.5 means home favored), `home_spread_odds`, `away_spread_odds`\n"
+    "  - `total` (game total), `over_odds`, `under_odds`"
+)
+
+st.title("🏈 Team Odds Model — Moneyline / ATS / Over–Under")
+st.caption("Upload data → train → get probabilities, recommended picks, and expected value (EV).")
+
+# ===== Body =====
+if not hist_file:
+    st.warning("Upload a **Historical games CSV** to begin.")
+    st.stop()
+
+try:
+    df_hist_raw = pd.read_csv(hist_file)
+except Exception as e:
+    st.error(f"Could not read historical CSV: {e}")
+    st.stop()
+
+with st.expander("Preview: Historical data (first 20 rows)"):
+    st.dataframe(df_hist_raw.head(20), use_container_width=True)
+
+# Validate / split features & targets from historical data
+parsed = parse_and_validate_schema(df_hist_raw, expected_targets=targets)
+if parsed.errors:
+    st.error("Schema issues found in the historical CSV:")
+    for err in parsed.errors:
+        st.write(f"• {err}")
+    st.stop()
+
+st.success("Historical data looks good.")
+
+# Train one model per target
+trained_models = {}
+metrics_blocks = []
+train_button = st.button("🚀 Train Models", type="primary", use_container_width=True)
+
+if train_button:
+    with st.spinner("Training models…"):
+        for target in targets:
+            model_obj = train_model(
+                df_hist_raw,
+                target=target,
+                model_type=model_type,
+                cv_folds=cv_folds,
+                calibrate=calibrate,
+            )
+            trained_models[target] = model_obj
+            metrics_blocks.append((target, model_obj["metrics"]))
+
+    st.success("Models trained.")
+
+    cols = st.columns(len(metrics_blocks)) if metrics_blocks else [st]
+    for i, (target, m) in enumerate(metrics_blocks):
+        with cols[i]:
+            st.markdown(f"### Metrics — **{target}**")
+            st.json(m, expanded=False)
+
+# Predict (if both trained and upcoming present)
+if not future_file:
+    st.info("Upload an **Upcoming games CSV** to generate predictions and EV.")
+    st.stop()
+
+try:
+    df_future_raw = pd.read_csv(future_file)
+except Exception as e:
+    st.error(f"Could not read upcoming CSV: {e}")
+    st.stop()
+
+with st.expander("Preview: Upcoming games data (first 20 rows)"):
+    st.dataframe(df_future_raw.head(20), use_container_width=True)
+
+if not trained_models:
+    st.warning("Train your models first, then re-run predictions.")
+    st.stop()
+
+predict_button = st.button("📈 Predict Upcoming Games", type="secondary", use_container_width=True)
+
+if predict_button:
+    all_outputs = []
+    with st.spinner("Scoring upcoming games…"):
+        for target in targets:
+            res_df = predict_for_upcoming(trained_models[target], df_future_raw.copy(), target)
+            res_df.insert(0, "target", target)
+            all_outputs.append(res_df)
+
+    if all_outputs:
+        results_df = pd.concat(all_outputs, ignore_index=True)
+
+        # Order columns nicely if present
+        preferred_cols = [
+            "target",
+            "game_id",
+            "game_date",
+            "home_team",
+            "away_team",
+            "prediction_side",
+            "model_prob",
+            "book_implied_prob",
+            "edge",
+            "ev_per_$100",
+            # moneyline / spread / total odds:
+            "home_ml", "away_ml",
+            "spread", "home_spread_odds", "away_spread_odds",
+            "total", "over_odds", "under_odds",
+        ]
+        exist_cols = [c for c in preferred_cols if c in results_df.columns]
+        other_cols = [c for c in results_df.columns if c not in exist_cols]
+        results_df = results_df[exist_cols + other_cols]
+
+        st.markdown("## Results")
+        st.dataframe(results_df, use_container_width=True)
+
+        # Download
+        csv = results_df.to_csv(index=False)
+        st.download_button(
+            "💾 Download Predictions CSV",
+            data=csv,
+            file_name="team_odds_predictions.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        # Quick EV summary by target
+        st.markdown("### 📊 EV Summary (Top opportunities)")
+        for t in targets:
+            sub = results_df[results_df["target"] == t].copy()
+            if "ev_per_$100" in sub.columns and not sub.empty:
+                st.markdown(f"**{t}** — top edges")
+                show = sub.sort_values("ev_per_$100", ascending=False).head(10)
+                st.dataframe(show[[
+                    c for c in ["game_date", "home_team", "away_team", "prediction_side",
+                                "model_prob", "book_implied_prob", "edge", "ev_per_$100"]
+                    if c in show.columns
+                ]], use_container_width=True)
             else:
-                df = pd.json_normalize(js)
-        else:
-            continue
-        df["__source_file"] = fname
-        frames.append(df)
-    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
-
-# --- Column detection ---
-NAME_CANDIDATES = ["Name","Player","PlayerName","FullName"]
-WEEK_CANDIDATES = ["Week","GameWeek"]
-TEAM_CANDIDATES = ["Team","TeamAbbr","TeamName"]
-OPP_CANDIDATES  = ["Opponent","Opp","OpponentTeam","GlobalOpponentID"]
-
-def _detect_col(df, candidates):
-    for c in candidates:
-        if c in df.columns: return c
-    low = {c.lower(): c for c in df.columns}
-    for c in candidates:
-        if c.lower() in low: return low[c.lower()]
-    return None
-
-def detect_name_column(df): return _detect_col(df, NAME_CANDIDATES)
-def detect_week_column(df): return _detect_col(df, WEEK_CANDIDATES)
-def detect_team_column(df): return _detect_col(df, TEAM_CANDIDATES)
-def detect_opp_column(df):  return _detect_col(df, OPP_CANDIDATES)
-
-def standardize_columns(df):
-    n, w = detect_name_column(df), detect_week_column(df)
-    if n and n != "Name": df = df.rename(columns={n:"Name"})
-    if w and w != "Week": df = df.rename(columns={w:"Week"})
-    if "Week" in df.columns:
-        df["Week"] = pd.to_numeric(df["Week"], errors="coerce")
-    if "Name" in df.columns:
-        df["Name"] = df["Name"].astype(str).str.strip()
-    return df
-
-def find_target_column(df, market):
-    req = MARKET_KEYWORDS.get(market)
-    if not req: return None
-    lcmap = {c.lower(): c for c in df.columns}
-    for lc, orig in lcmap.items():
-        if all(any(k in lc for k in group) for group in req):
-            return orig
-    return None
-
-# --- Probability / confidence helpers ---
-def normal_over_probability(samples, line):
-    x = np.array(samples, dtype=float)
-    x = x[~np.isnan(x)]
-    if not len(x): return float("nan")
-    mu, sd = np.mean(x), np.std(x, ddof=1) if len(x)>1 else 0.0
-    if sd < 1e-9: return 1.0 if mu > line else 0.0
-    z = (line - mu)/(sd*math.sqrt(2))
-    return 0.5 * math.erfc(z)
-
-def confidence_score(samples):
-    x = np.array(samples, dtype=float)
-    x = x[~np.isnan(x)]
-    if not len(x): return 0.0
-    n, sd = len(x), np.std(x, ddof=1) if len(x)>1 else 0.0
-    base = min(1.0, math.sqrt(n)/4.0)
-    penalty = 1.0/(1.0+sd)
-    return max(0.0, min(1.0, base*penalty))
+                st.caption(f"{t}: no odds present to compute EV.")
