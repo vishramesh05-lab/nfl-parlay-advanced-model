@@ -1,240 +1,374 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
+import json
 import io
-import re
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-VERSION = "v0.9 – Player Parlay (Usage-Only, Single CSV)"
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 
-# ---------- Column normalization ----------
+VERSION = "v1.2 — Team Odds (JSON/CSV uploads, matchup simulator)"
+TRAINABLE_TARGETS = ["moneyline", "spread", "over_under"]
 
-def _canon(s: str) -> str:
-    s = re.sub(r"[\s/]+", "_", s.strip(), flags=re.I)
-    s = re.sub(r"[^a-zA-Z0-9_]+", "", s, flags=re.I)
-    return s.lower()
+META_COLS = [
+    "GlobalGameID","ScoreID","Date","DateTime","GameDate","Week","Season","SeasonType",
+    "Stadium","PlayingSurface","HomeOrAway","Team","Opponent","home_team","away_team",
+    "game_id","game_date",
+]
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [_canon(c) for c in df.columns]
-    # common FantasyPros headings
-    rename = {
-        "player": "player",
-        "team": "team",
-        "tm": "team",
-        "position": "pos",
-        "pos": "pos",
+# ==================== Ingest ====================
+
+def _try_read(file) -> pd.DataFrame:
+    name = (getattr(file, "name", "") or "").lower()
+    if name.endswith(".json"):
+        try:
+            data = json.load(file)
+            if isinstance(data, list):
+                return pd.DataFrame(data)
+            elif isinstance(data, dict):
+                # maybe an id->obj mapping
+                try:
+                    return pd.DataFrame(list(data.values()))
+                except Exception:
+                    return pd.json_normalize(data)
+        except Exception:
+            file.seek(0)
+            text = file.read()
+            try:
+                data = json.loads(text)
+                return pd.DataFrame(data if isinstance(data, list) else [data])
+            except Exception:
+                pass
+    file.seek(0)
+    # csv fallback
+    try:
+        return pd.read_csv(file)
+    except Exception:
+        file.seek(0)
+        return pd.read_json(file, lines=True)
+
+def ingest_files_to_games_df(files) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    frames = []
+    notes = {}
+    for f in files:
+        try:
+            df = _try_read(f)
+            notes[getattr(f, "name", "file")] = {"rows": len(df), "cols": list(df.columns)[:20]}
+            frames.append(df)
+        except Exception as e:
+            notes[getattr(f, "name", "file")] = {"error": str(e)}
+    if not frames:
+        return pd.DataFrame(), notes
+
+    df = pd.concat(frames, ignore_index=True, sort=False)
+    # canonicalize some names
+    ren = {
+        "TeamName":"Team",
+        "Day":"Date",
+        "OpponentTeam":"Opponent",
+        "HomeAway":"HomeOrAway",
+        "OverUnder":"OverUnder",
+        "PointSpread":"PointSpread",
+        "TotalScore":"TotalScore",
     }
-    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    for k, v in ren.items():
+        if k in df.columns and v not in df.columns:
+            df[v] = df[k]
+
+    # Ensure basic expected columns if present in variations
+    if "Team" not in df.columns and "team" in df.columns:
+        df["Team"] = df["team"]
+    if "Opponent" not in df.columns and "opponent" in df.columns:
+        df["Opponent"] = df["opponent"]
+    if "HomeOrAway" not in df.columns and "homeoraway" in df.columns:
+        df["HomeOrAway"] = df["homeoraway"].str.upper()
+
+    # numeric coerce for key stats if present
+    for c in ["Score","OpponentScore","OverUnder","PointSpread","TotalScore"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    return df, notes
+
+# ==================== Transform to home rows ====================
+
+def build_home_game_rows(df_team: pd.DataFrame) -> pd.DataFrame:
+    df = df_team.copy()
+    # Some sources include TotalScore; if not, compute it.
+    if "TotalScore" not in df.columns and {"Score","OpponentScore"}.issubset(df.columns):
+        df["TotalScore"] = df["Score"] + df["OpponentScore"]
+
+    # Identify home records
+    if "HomeOrAway" in df.columns:
+        home_mask = df["HomeOrAway"].astype(str).str.upper().eq("HOME")
+        # If we have a unique game id use it to pick the home
+        if "GlobalGameID" in df.columns:
+            home_rows = df[home_mask].copy()
+            # If there are cases with no home row (only away), approximate by picking max ScoreID/first
+            if home_rows.empty:
+                # Fall back: try to create home rows by picking one per game and mapping columns
+                home_rows = df.sort_values("ScoreID").groupby("GlobalGameID", as_index=False).first()
+        else:
+            # Fallback: rely on HomeOrAway
+            home_rows = df[home_mask].copy()
+    else:
+        # If HomeOrAway missing, try to infer: treat first of (Team,Opponent,Date) as home (best effort)
+        key_cols = [c for c in ["Date","DateTime","GameDate","Week","Season"] if c in df.columns]
+        grp_cols = key_cols + ["Team","Opponent"]
+        df["_gid"] = pd.factorize(df[grp_cols].astype(str).agg("|".join, axis=1))[0]
+        home_rows = df.drop_duplicates(subset=["_gid"]).copy()
+
+    # Rename teams
+    home_rows["home_team"] = home_rows.get("Team")
+    home_rows["away_team"] = home_rows.get("Opponent")
+
+    # Targets will be computed later. Keep all numeric features.
+    # Drop pure opponent team strings etc. Keep a wide table.
+    return home_rows.reset_index(drop=True)
+
+# ==================== Targets from lines/scores ====================
+
+def compute_targets_from_lines(home_rows: pd.DataFrame) -> pd.DataFrame:
+    df = home_rows.copy()
+    # Moneyline: 1 if home won
+    if {"Score","OpponentScore"}.issubset(df.columns):
+        df["moneyline"] = (df["Score"] > df["OpponentScore"]).astype(int)
+
+    # Spread (ATS): need PointSpread from the home perspective.
+    # Many feeds give per-team spread (home rows should represent HOME team line).
+    # We'll assume df["PointSpread"] is the **home team's** line (negative if favored).
+    if {"Score","OpponentScore","PointSpread"}.issubset(df.columns):
+        margin = df["Score"] - df["OpponentScore"]
+        df["spread"] = (margin + df["PointSpread"]) > 0  # home + spread beats opponent
+        df["spread"] = df["spread"].astype(int)
+
+    # Over/Under: if OverUnder and TotalScore present
+    if {"OverUnder","TotalScore"}.issubset(df.columns):
+        df["over_under"] = (df["TotalScore"] > df["OverUnder"]).astype(int)
+
     return df
 
-# ---------- Schema detection ----------
+# ==================== Modeling ====================
 
-def detect_schema(df: pd.DataFrame) -> dict:
-    cols = df.columns.tolist()
-    # Find week columns that look like snaps or snap%
-    week_cols_snaps = [c for c in cols if re.search(r"^(w?k?|(week)?_?)\d+(_)?(snaps|off_snaps)$", c)]
-    week_cols_pct   = [c for c in cols if re.search(r"^(w?k?|(week)?_?)\d+(_)?(snap_pct|off_snap_pct|off_snap_percent)$", c)]
-    # Broad FantasyPros formats sometimes ship as "wk1_snaps", "wk1_snap_pct"
-    if not week_cols_snaps:
-        week_cols_snaps = [c for c in cols if re.search(r"^wk?\d+_snaps$", c)]
-    if not week_cols_pct:
-        week_cols_pct = [c for c in cols if re.search(r"^wk?\d+_snap_pct$", c)]
+def _numeric_feature_cols(df: pd.DataFrame) -> List[str]:
+    ex = set(META_COLS + TRAINABLE_TARGETS + ["Score","OpponentScore"])
+    return [c for c in df.select_dtypes(include=[np.number]).columns if c not in ex]
 
-    # Optional columns
-    routes_cols = [c for c in cols if re.search(r"(routes|routes_run)(_wk?\d+)?$", c)]
-    targets_cols = [c for c in cols if re.search(r"(tgt|targets)(_wk?\d+)?$", c)]
+def _preprocessor(numeric_cols: List[str]) -> ColumnTransformer:
+    return ColumnTransformer(
+        transformers=[("num", PipelineSimple(), numeric_cols)],
+        remainder="drop",
+        verbose_feature_names_out=False,
+    )
 
-    pos_col  = "pos"  if "pos" in cols else None
-    team_col = "team" if "team" in cols else None
-    name_col = "player" if "player" in cols else (cols[0] if cols else None)
+class PipelineSimple(SimpleImputer):
+    # small helper: impute median then scale
+    def __init__(self):
+        super().__init__(strategy="median")
+        self.scaler = StandardScaler()
+    def fit(self, X, y=None):
+        Z = super().fit_transform(X)
+        self.scaler.fit(Z)
+        return self
+    def transform(self, X):
+        Z = super().transform(X)
+        return self.scaler.transform(Z)
 
+def _make_clf(model_type: str):
+    m = model_type.lower()
+    if m == "log_reg":
+        return LogisticRegression(max_iter=2000)
+    if m == "random_forest":
+        return RandomForestClassifier(
+            n_estimators=400,
+            min_samples_split=4,
+            min_samples_leaf=2,
+            n_jobs=-1,
+            random_state=42,
+            class_weight="balanced_subsample",
+        )
+    if m == "gbm":
+        return GradientBoostingClassifier(random_state=42)
+    raise ValueError(f"Unknown model_type: {model_type}")
+
+def _cv_metrics(pipe, X, y, folds=5):
+    cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+    def score(sc):
+        try:
+            return float(cross_val_score(pipe, X, y, cv=cv, scoring=sc).mean())
+        except Exception:
+            return np.nan
     return {
-        "name_col": name_col,
-        "team_col": team_col,
-        "pos_col": pos_col,
-        "week_cols_snaps": sorted(week_cols_snaps, key=_week_key),
-        "week_cols_pct":   sorted(week_cols_pct, key=_week_key),
-        "routes_cols": sorted(routes_cols, key=_week_key) if routes_cols else [],
-        "targets_cols": sorted(targets_cols, key=_week_key) if targets_cols else [],
+        "cv_accuracy": round(score("accuracy"), 4),
+        "cv_auc": None if np.isnan(score("roc_auc")) else round(score("roc_auc"), 4),
+        "cv_f1": round(score("f1"), 4),
+        "cv_precision": round(score("precision"), 4),
+        "cv_recall": round(score("recall"), 4),
     }
 
-def _week_key(col: str) -> int:
-    m = re.search(r"(\d+)", col)
-    return int(m.group(1)) if m else 0
+def train_model(df_home: pd.DataFrame, target: str, model_type="log_reg", cv_folds=5, calibrate=True):
+    if target not in df_home.columns:
+        raise ValueError(f"Target '{target}' not present.")
+    y = df_home[target].astype(int)
+    X_cols = _numeric_feature_cols(df_home)
+    X = df_home[X_cols].copy()
 
-# ---------- Build weekly matrix ----------
+    prep = _preprocessor(X_cols)
+    base = _make_clf(model_type)
+    if calibrate:
+        clf = CalibratedClassifierCV(base, method="sigmoid", cv=3)
+    else:
+        clf = base
 
-def build_week_matrix(df: pd.DataFrame, schema: dict) -> pd.DataFrame:
-    df = df.copy()
-    name = schema["name_col"] or "player"
-    team = schema["team_col"] or "team"
-    pos  = schema["pos_col"] or "pos"
+    from sklearn.pipeline import Pipeline
+    pipe = Pipeline([("prep", prep), ("clf", clf)])
 
-    # Ensure present
-    if name not in df.columns:
-        df[name] = np.arange(len(df)).astype(str)
-    if team not in df.columns:
-        df[team] = "UNK"
-    if pos not in df.columns:
-        df[pos] = "UNK"
+    metrics = _cv_metrics(pipe, X, y, folds=cv_folds)
+    pipe.fit(X, y)
 
-    wk_cols_pct   = schema["week_cols_pct"]
-    wk_cols_snaps = schema["week_cols_snaps"]
-    routes_cols   = schema["routes_cols"]
-    targets_cols  = schema["targets_cols"]
+    return {"pipeline": pipe, "metrics": metrics, "feature_cols": X_cols, "target": target}
 
-    # Prefer snap% if available; else derive from snaps by within-team max (approx)
-    weeks = sorted({*_weeks_from_cols(wk_cols_pct), *_weeks_from_cols(wk_cols_snaps)})
-    rows = []
-    for _, r in df.iterrows():
-        for w in weeks:
-            snap_pct = _get_week_value(r, wk_cols_pct, w)
-            snaps    = _get_week_value(r, wk_cols_snaps, w)
-            routes   = _get_week_value(r, routes_cols, w)
-            targets  = _get_week_value(r, targets_cols, w)
-            rows.append({
-                "player": r[name],
-                "team": r[team],
-                "pos": r[pos],
-                "week": w,
-                "snap_pct": snap_pct,
-                "snaps": snaps,
-                "routes": routes,
-                "targets": targets,
-            })
-    out = pd.DataFrame(rows)
+def predict_proba_for_homerow(model_obj: Dict[str, Any], home_row: Dict[str, Any]) -> float:
+    X_cols = model_obj["feature_cols"]
+    x = pd.DataFrame([{c: home_row.get(c, np.nan) for c in X_cols}])
+    proba = model_obj["pipeline"].predict_proba(x)[:, 1][0]
+    return float(np.clip(proba, 0.0, 1.0))
 
-    # Clean types
-    for c in ["snap_pct", "snaps", "routes", "targets"]:
-        if c in out.columns:
-            out[c] = pd.to_numeric(out[c], errors="coerce")
+# ==================== Odds helpers ====================
 
-    # Drop rows with no information at all
-    keep = (~out["snap_pct"].isna()) | (~out["snaps"].isna()) | (~out["routes"].isna()) | (~out["targets"].isna())
-    out = out.loc[keep].copy()
+def american_to_implied_prob(o: Optional[float]) -> Optional[float]:
+    if o is None: return None
+    try:
+        o = float(o)
+    except Exception:
+        return None
+    if np.isnan(o): return None
+    if o < 0:  # favorite
+        return (-o) / ((-o) + 100.0)
+    else:
+        return 100.0 / (o + 100.0)
 
-    # If snap_pct missing but snaps exist, convert to within-player relative (fallback)
-    # (We avoid team normalization here to stay single-CSV)
-    out["snap_pct"] = out.groupby("player")["snaps"].apply(lambda s: 100 * s / s.max() if s.max() and s.max() > 0 else s) \
-                        .where(out["snap_pct"].isna(), out["snap_pct"])
+def expected_value_per_100(p: float, american_odds: float) -> float:
+    o = float(american_odds)
+    if o < 0:
+        win_profit = 100.0 * (100.0 / abs(o))
+    else:
+        win_profit = o
+    return p * win_profit - (1.0 - p) * 100.0
 
-    # Drop duplicates and sort
-    out = out.drop_duplicates(subset=["player", "week"]).sort_values(["player", "week"]).reset_index(drop=True)
-    return out
+# ==================== Matchup synthesis ====================
 
-def _weeks_from_cols(cols):
-    wk = []
-    for c in cols:
-        m = re.search(r"(\d+)", c)
-        if m:
-            wk.append(int(m.group(1)))
-    return wk
+def _safe_float(x):
+    try:
+        f = float(x)
+        if np.isnan(f): return None
+        return f
+    except Exception:
+        return None
 
-def _get_week_value(row, cols, w):
-    # find a column in 'cols' whose digits match week w
-    for c in cols:
-        m = re.search(r"(\d+)", c)
-        if m and int(m.group(1)) == int(w):
-            return row.get(c, np.nan)
-    return np.nan
+def make_homerow_from_rolling_avgs(
+    home_rows_all: pd.DataFrame,
+    team_home: str,
+    team_away: str,
+    last_n: int = 4,
+    spread_text: str = "",
+    total_text: str = "",
+    home_ml_text: str = "",
+    away_ml_text: str = "",
+    home_spread_odds_text: str = "",
+    away_spread_odds_text: str = "",
+    over_odds_text: str = "",
+    under_odds_text: str = "",
+) -> Dict[str, Any]:
+    df = home_rows_all.copy()
 
-# ---------- Features & scoring ----------
+    # Build per-team recent averages using the *home-row schema*. For the away team,
+    # we will map home metrics <-> opponent metrics.
+    def team_recent_avg(team_name: str):
+        # consider games where team was home (home_rows) and also where it appeared as away
+        # Construct a "team view": if the selected team was AWAY in a home_row, swap columns.
+        hx = df[(df["home_team"] == team_name) | (df["away_team"] == team_name)].copy()
+        if hx.empty:
+            return {}
 
-def compute_usage_features(wk_df: pd.DataFrame, routes_weight=0.6, targets_weight=0.8, l3_weight=1.0, trend_weight=1.0):
-    df = wk_df.copy()
-    df["snap_pct"] = df["snap_pct"].clip(0, 100)
+        # Re-map to a unified "team perspective": columns that start with "Opponent" should come from the opponent.
+        # If the team is home in that row, keep as-is; if the team is away, we need to swap Team<->Opponent fields.
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-    # last week by player
-    last_weeks = df.groupby("player")["week"].max().rename("week_last")
-    t = df.merge(last_weeks, on="player", how="left")
+        rows = []
+        for _, r in hx.iterrows():
+            row = {}
+            is_home = (r["home_team"] == team_name)
+            for c in numeric_cols:
+                if c in ["Score","OpponentScore"]:  # keep raw, swaps below if needed
+                    pass
+                v = r.get(c, np.nan)
+                if is_home:
+                    # team perspective: base metrics without "Opponent" prefix belong to team,
+                    # and "Opponent..." belong to opponent — keep as-is
+                    row[c] = v
+                else:
+                    # if away, swap: team metrics should use opponent-prefixed columns and vice-versa where sensible
+                    if c.startswith("Opponent"):
+                        # OpponentX for home row = TEAM X for away team's perspective
+                        key = c[len("Opponent"):]
+                        # find non-opponent name for same stat
+                        alt = key if key in numeric_cols else c
+                        row[c] = r.get(alt, v)
+                    else:
+                        # non-opponent metric: use the "opponent" version from row if it exists
+                        oppc = "Opponent" + c
+                        row[c] = r.get(oppc, v)
+            rows.append(row)
 
-    # last-3-weeks rolling stats
-    t = t.sort_values(["player", "week"])
-    for col in ["snap_pct", "routes", "targets"]:
-        t[f"l3_{col}"] = t.groupby("player")[col].transform(lambda s: s.rolling(3, min_periods=1).mean())
+        if not rows:
+            return {}
 
-    # week-over-week trend (delta of snap%)
-    t["wow_snap_pct"] = t.groupby("player")["snap_pct"].diff().fillna(0.0)
+        tdf = pd.DataFrame(rows)
+        if tdf.empty:
+            return {}
 
-    # keep only the latest row per player for scoring
-    latest = t[t["week"] == t["week_last"]].copy()
+        # Average of last N rows
+        tdf = tdf.tail(last_n)
+        return tdf.mean(numeric_only=True).to_dict()
 
-    # games_count in dataset
-    latest["games_count"] = t.groupby("player")["week"].transform("count").loc[latest.index]
+    avg_home = team_recent_avg(team_home)
+    avg_away = team_recent_avg(team_away)
 
-    # usage score (bounded)
-    # base: snap% last-3-weeks
-    base = (latest["l3_snap_pct"].fillna(0) / 100.0) * l3_weight
-    # trend: wow delta (percentage points -> scale)
-    trend = (latest["wow_snap_pct"].fillna(0) / 50.0) * trend_weight  # ~±2.0 for ±100pp (guarded)
-    # optional routes/targets
-    rts = (latest["l3_routes"].fillna(0))
-    tgts = (latest["l3_targets"].fillna(0))
-    # normalize routes/targets to [0,1] per position to avoid bias
-    for c, w in [("l3_routes", routes_weight), ("l3_targets", targets_weight)]:
-        mx = latest.groupby("pos")[c].transform(lambda s: s.fillna(0).quantile(0.95) if (s.notna().any()) else 1.0)
-        mx = mx.replace(0, 1.0)
-        latest[f"norm_{c}"] = latest[c].fillna(0) / mx
-    rts_n = latest["norm_l3_routes"]
-    tgts_n = latest["norm_l3_targets"]
+    # Construct one synthetic home-row dict
+    synth = {}
+    # For every numeric feature seen in training, set team/opponent sides from averages
+    all_num = df.select_dtypes(include=[np.number]).columns.tolist()
+    for c in all_num:
+        if c.startswith("Opponent"):
+            base = c[len("Opponent"):]
+            if base in avg_away:
+                synth[c] = avg_away.get(base)
+            else:
+                synth[c] = avg_away.get(c, np.nan)
+        else:
+            synth[c] = avg_home.get(c, np.nan)
 
-    usage = base + trend + routes_weight * rts_n + targets_weight * tgts_n
-    latest["usage_score"] = usage.clip(lower=0)
+    # Set meta + betting inputs if provided
+    synth["home_team"] = team_home
+    synth["away_team"] = team_away
 
-    # friendly columns
-    keep_cols = [
-        "player","team","pos","week_last","games_count",
-        "l3_snap_pct","wow_snap_pct","l3_routes","l3_targets","usage_score"
-    ]
-    return latest[keep_cols].sort_values("usage_score", ascending=False).reset_index(drop=True)
+    # Betting lines (optional)
+    synth["home_ml"] = _safe_float(home_ml_text)
+    synth["away_ml"] = _safe_float(away_ml_text)
+    synth["PointSpread"] = _safe_float(spread_text)  # home-line
+    synth["OverUnder"] = _safe_float(total_text)
+    synth["home_spread_odds"] = _safe_float(home_spread_odds_text)
+    synth["away_spread_odds"] = _safe_float(away_spread_odds_text)
+    synth["over_odds"] = _safe_float(over_odds_text)
+    synth["under_odds"] = _safe_float(under_odds_text)
 
-# ---------- Recommendation logic ----------
-
-POS_ORDER = ["RB","WR","TE","QB","FB","HB"]
-
-def _pos_norm(s):
-    s = str(s).upper()
-    if s.startswith("RB"): return "RB"
-    if s.startswith("WR"): return "WR"
-    if s.startswith("TE"): return "TE"
-    if s.startswith("QB"): return "QB"
-    return s
-
-def rank_recommendations_by_pos(feat_df: pd.DataFrame, per_pos: int = 8):
-    x = feat_df.copy()
-    x["pos"] = x["pos"].map(_pos_norm)
-
-    # Over candidates: highest usage scores within position
-    overs = []
-    for p in POS_ORDER:
-        sub = x[x["pos"] == p].copy()
-        if not sub.empty:
-            sub = sub.sort_values(["usage_score","l3_snap_pct","wow_snap_pct"], ascending=[False, False, False]).head(per_pos)
-            sub.insert(0, "pick", "OVER")
-            overs.append(sub)
-    over_df = pd.concat(overs, ignore_index=True) if overs else pd.DataFrame(columns=x.columns)
-
-    # Under candidates: lowest usage scores (and low/negative trend)
-    unders = []
-    for p in POS_ORDER:
-        sub = x[x["pos"] == p].copy()
-        if not sub.empty:
-            sub["trend_rank"] = sub["wow_snap_pct"].rank(method="first")
-            sub = sub.sort_values(["usage_score","wow_snap_pct","l3_snap_pct"], ascending=[True, True, True]).head(per_pos)
-            sub.insert(0, "pick", "UNDER")
-            unders.append(sub.drop(columns=["trend_rank"], errors="ignore"))
-    under_df = pd.concat(unders, ignore_index=True) if unders else pd.DataFrame(columns=x.columns)
-
-    # Format
-    show_cols = ["pick","player","team","pos","week_last","games_count","l3_snap_pct","wow_snap_pct","l3_routes","l3_targets","usage_score"]
-    return {"over": over_df[show_cols], "under": under_df[show_cols]}
-
-# ---------- Export ----------
-
-def export_recommendations_csv(recs: dict) -> bytes:
-    df = pd.concat([
-        recs["over"].assign(list_type="over"),
-        recs["under"].assign(list_type="under")
-    ], ignore_index=True)
-    out = io.StringIO()
-    df.to_csv(out, index=False)
-    return out.getvalue().encode("utf-8")
+    return synth
