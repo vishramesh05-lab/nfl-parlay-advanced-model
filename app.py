@@ -1,184 +1,108 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from utilities import (
-    TRAINABLE_TARGETS,
-    parse_and_validate_schema,
-    train_model,
-    predict_for_upcoming,
-    american_to_implied_prob,
-    VERSION_STRING,
+    VERSION,
+    normalize_columns,
+    detect_schema,
+    build_week_matrix,
+    compute_usage_features,
+    rank_recommendations_by_pos,
+    export_recommendations_csv
 )
 
-st.set_page_config(page_title="Team Odds Model – Moneyline / ATS / Totals", layout="wide")
+st.set_page_config(page_title="Player Parlay – Usage Picker", layout="wide")
+st.title("🏈 Player Parlay – Usage-Based Picks (Single CSV)")
+st.caption(VERSION)
 
-# ===== Sidebar =====
-st.sidebar.title("Team Odds Predictor")
-st.sidebar.caption(VERSION_STRING)
+with st.sidebar:
+    st.header("Upload")
+    csv = st.file_uploader("FantasyPros 2025 Offense Snap Counts CSV", type=["csv"])
+    st.markdown(
+        "- Works out-of-the-box with **FantasyPros_Fantasy_Football_2025_Offense_Snap_Counts.csv**\n"
+        "- No API keys, no extra files"
+    )
+    st.divider()
+    st.header("Settings")
+    recs_per_pos = st.slider("Top picks per position", 3, 20, 8)
+    min_weeks = st.slider("Min games played (to consider)", 1, 8, 2)
+    min_snap_pct = st.slider("Min last-3-weeks snap %", 0, 100, 25)
+    trend_weight = st.slider("Trend weight (WoW delta)", 0.0, 2.0, 1.0, 0.1)
+    l3_weight = st.slider("Last-3-weeks weight", 0.0, 2.0, 1.0, 0.1)
+    routes_weight = st.slider("Routes weight (if available)", 0.0, 2.0, 0.6, 0.1)
+    targets_weight = st.slider("Targets weight (if available)", 0.0, 2.0, 0.8, 0.1)
+    st.caption("Tip: If your CSV doesn't have routes/targets, the model falls back to snap% only.")
 
-st.sidebar.markdown("### 1) Upload data")
-hist_file = st.sidebar.file_uploader("Historical games CSV (for training)", type=["csv"])
-future_file = st.sidebar.file_uploader("Upcoming games CSV (for predictions)", type=["csv"])
-
-st.sidebar.markdown("### 2) Choose targets")
-targets = st.sidebar.multiselect(
-    "Select prediction targets",
-    TRAINABLE_TARGETS,
-    default=TRAINABLE_TARGETS,  # ["moneyline","spread","over_under"]
-)
-
-st.sidebar.markdown("### 3) Model / CV")
-model_type = st.sidebar.selectbox("Model type", ["log_reg", "random_forest", "gbm"])
-cv_folds = st.sidebar.slider("Cross-validation folds", 3, 10, 5)
-calibrate = st.sidebar.checkbox("Calibrate probabilities (Platt scaling)", value=True)
-
-st.sidebar.markdown("### 4) Odds settings (optional but recommended)")
-st.sidebar.caption(
-    "If your upcoming CSV includes American odds columns, the app will compute implied probability and EV."
-)
-
-st.sidebar.divider()
-st.sidebar.markdown("**Notes / Tips**")
-st.sidebar.info(
-    "- Targets expected in historical data:\n"
-    "  - moneyline: `result_home_win` ∈ {0,1}\n"
-    "  - spread (ATS): `result_home_cover` ∈ {0,1}\n"
-    "  - over_under: `result_over` ∈ {0,1}\n\n"
-    "- Odds columns in upcoming data (optional):\n"
-    "  - `home_ml`, `away_ml` (American odds)\n"
-    "  - `spread` (float, e.g., -3.5 means home favored), `home_spread_odds`, `away_spread_odds`\n"
-    "  - `total` (game total), `over_odds`, `under_odds`"
-)
-
-st.title("🏈 Team Odds Model — Moneyline / ATS / Over–Under")
-st.caption("Upload data → train → get probabilities, recommended picks, and expected value (EV).")
-
-# ===== Body =====
-if not hist_file:
-    st.warning("Upload a **Historical games CSV** to begin.")
+if not csv:
+    st.info("Upload your **FantasyPros Offense Snap Counts** CSV to begin.")
     st.stop()
 
 try:
-    df_hist_raw = pd.read_csv(hist_file)
+    df_raw = pd.read_csv(csv)
 except Exception as e:
-    st.error(f"Could not read historical CSV: {e}")
+    st.error(f"Could not read CSV: {e}")
     st.stop()
 
-with st.expander("Preview: Historical data (first 20 rows)"):
-    st.dataframe(df_hist_raw.head(20), use_container_width=True)
+st.subheader("Preview")
+st.dataframe(df_raw.head(15), use_container_width=True)
 
-# Validate / split features & targets from historical data
-parsed = parse_and_validate_schema(df_hist_raw, expected_targets=targets)
-if parsed.errors:
-    st.error("Schema issues found in the historical CSV:")
-    for err in parsed.errors:
-        st.write(f"• {err}")
-    st.stop()
+# Normalize columns and detect schema
+df = normalize_columns(df_raw.copy())
+schema = detect_schema(df)
 
-st.success("Historical data looks good.")
+with st.expander("Detected schema"):
+    st.json(schema)
 
-# Train one model per target
-trained_models = {}
-metrics_blocks = []
-train_button = st.button("🚀 Train Models", type="primary", use_container_width=True)
+# Build a week x player matrix for snaps and snap%
+wk_df = build_week_matrix(df, schema)
 
-if train_button:
-    with st.spinner("Training models…"):
-        for target in targets:
-            model_obj = train_model(
-                df_hist_raw,
-                target=target,
-                model_type=model_type,
-                cv_folds=cv_folds,
-                calibrate=calibrate,
-            )
-            trained_models[target] = model_obj
-            metrics_blocks.append((target, model_obj["metrics"]))
+with st.expander("Weekly matrix (first 100 rows)"):
+    st.dataframe(wk_df.head(100), use_container_width=True)
 
-    st.success("Models trained.")
+# Compute features: last-3-weeks avg, WoW trend, usage score
+feat_df = compute_usage_features(
+    wk_df,
+    routes_weight=routes_weight,
+    targets_weight=targets_weight,
+    l3_weight=l3_weight,
+    trend_weight=trend_weight
+)
 
-    cols = st.columns(len(metrics_blocks)) if metrics_blocks else [st]
-    for i, (target, m) in enumerate(metrics_blocks):
-        with cols[i]:
-            st.markdown(f"### Metrics — **{target}**")
-            st.json(m, expanded=False)
+# Filters
+mask = (feat_df["games_count"] >= min_weeks) & (feat_df["l3_snap_pct"] >= min_snap_pct)
+feat_filtered = feat_df.loc[mask].copy()
 
-# Predict (if both trained and upcoming present)
-if not future_file:
-    st.info("Upload an **Upcoming games CSV** to generate predictions and EV.")
-    st.stop()
+st.subheader("Usage features (filtered)")
+st.dataframe(
+    feat_filtered[[
+        "player","team","pos","week_last","games_count",
+        "l3_snap_pct","wow_snap_pct","l3_routes","l3_targets","usage_score"
+    ]].sort_values("usage_score", ascending=False),
+    use_container_width=True
+)
 
-try:
-    df_future_raw = pd.read_csv(future_file)
-except Exception as e:
-    st.error(f"Could not read upcoming CSV: {e}")
-    st.stop()
+# Recommendations by position (Over/Under style lists)
+st.subheader("🎯 Recommendations")
+recs = rank_recommendations_by_pos(feat_filtered, per_pos=recs_per_pos)
 
-with st.expander("Preview: Upcoming games data (first 20 rows)"):
-    st.dataframe(df_future_raw.head(20), use_container_width=True)
+cols = st.columns(2)
+with cols[0]:
+    st.markdown("#### 📈 Over candidates (high usage + rising trend)")
+    st.dataframe(recs["over"], use_container_width=True)
+with cols[1]:
+    st.markdown("#### 📉 Under candidates (low usage + falling trend)")
+    st.dataframe(recs["under"], use_container_width=True)
 
-if not trained_models:
-    st.warning("Train your models first, then re-run predictions.")
-    st.stop()
+# Download
+csv_bytes = export_recommendations_csv(recs)
+st.download_button(
+    "💾 Download picks (CSV)",
+    data=csv_bytes,
+    file_name="player_parlay_usage_picks.csv",
+    mime="text/csv",
+    use_container_width=True
+)
 
-predict_button = st.button("📈 Predict Upcoming Games", type="secondary", use_container_width=True)
-
-if predict_button:
-    all_outputs = []
-    with st.spinner("Scoring upcoming games…"):
-        for target in targets:
-            res_df = predict_for_upcoming(trained_models[target], df_future_raw.copy(), target)
-            res_df.insert(0, "target", target)
-            all_outputs.append(res_df)
-
-    if all_outputs:
-        results_df = pd.concat(all_outputs, ignore_index=True)
-
-        # Order columns nicely if present
-        preferred_cols = [
-            "target",
-            "game_id",
-            "game_date",
-            "home_team",
-            "away_team",
-            "prediction_side",
-            "model_prob",
-            "book_implied_prob",
-            "edge",
-            "ev_per_$100",
-            # moneyline / spread / total odds:
-            "home_ml", "away_ml",
-            "spread", "home_spread_odds", "away_spread_odds",
-            "total", "over_odds", "under_odds",
-        ]
-        exist_cols = [c for c in preferred_cols if c in results_df.columns]
-        other_cols = [c for c in results_df.columns if c not in exist_cols]
-        results_df = results_df[exist_cols + other_cols]
-
-        st.markdown("## Results")
-        st.dataframe(results_df, use_container_width=True)
-
-        # Download
-        csv = results_df.to_csv(index=False)
-        st.download_button(
-            "💾 Download Predictions CSV",
-            data=csv,
-            file_name="team_odds_predictions.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        # Quick EV summary by target
-        st.markdown("### 📊 EV Summary (Top opportunities)")
-        for t in targets:
-            sub = results_df[results_df["target"] == t].copy()
-            if "ev_per_$100" in sub.columns and not sub.empty:
-                st.markdown(f"**{t}** — top edges")
-                show = sub.sort_values("ev_per_$100", ascending=False).head(10)
-                st.dataframe(show[[
-                    c for c in ["game_date", "home_team", "away_team", "prediction_side",
-                                "model_prob", "book_implied_prob", "edge", "ev_per_$100"]
-                    if c in show.columns
-                ]], use_container_width=True)
-            else:
-                st.caption(f"{t}: no odds present to compute EV.")
+st.caption(
+    "Note: This app is usage-signal driven (snap%, routes, targets if present). "
+    "It doesn't need lines/odds; use these lists to shop for player props you like."
+)
